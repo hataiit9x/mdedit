@@ -1,0 +1,169 @@
+import { TocItem, TextStats } from '../types';
+
+export function extractToc(markdown: string): TocItem[] {
+  const lines = markdown.split('\n');
+  const toc: TocItem[] = [];
+  let inCodeBlock = false;
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('```')) {
+      inCodeBlock = !inCodeBlock;
+      return;
+    }
+    if (inCodeBlock) return;
+
+    const match = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (match) {
+      const level = match[1].length;
+      const rawText = match[2].trim();
+      // Remove inline markdown formatting like bold/italic for TOC label
+      const cleanText = rawText
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/\*(.*?)\*/g, '$1')
+        .replace(/`(.*?)`/g, '$1')
+        .replace(/\[(.*?)\]\(.*?\)/g, '$1');
+
+      const id = cleanText
+        .toLowerCase()
+        .replace(/[^\w\s-]/g, '')
+        .replace(/\s+/g, '-');
+
+      toc.push({
+        id: id || `heading-${toc.length + 1}`,
+        text: cleanText,
+        level,
+      });
+    }
+  });
+
+  return toc;
+}
+
+export function calculateStats(text: string): TextStats {
+  if (!text || !text.trim()) {
+    return {
+      words: 0,
+      characters: 0,
+      charactersNoSpaces: 0,
+      lines: 1,
+      paragraphs: 0,
+      readingTimeMinutes: 0,
+    };
+  }
+
+  const characters = text.length;
+  const charactersNoSpaces = text.replace(/\s/g, '').length;
+  const lines = text.split('\n').length;
+  
+  // Count words across western & CJK/Vietnamese text
+  const cleanForWords = text
+    .replace(/[#*`~_\[\]()>-]/g, ' ')
+    .trim();
+  const words = cleanForWords ? cleanForWords.split(/\s+/).filter(Boolean).length : 0;
+
+  const paragraphs = text
+    .split(/\n\s*\n/)
+    .filter(p => p.trim().length > 0).length;
+
+  const readingTimeMinutes = Math.max(1, Math.ceil(words / 200));
+
+  return {
+    words,
+    characters,
+    charactersNoSpaces,
+    lines,
+    paragraphs,
+    readingTimeMinutes,
+  };
+}
+
+export interface ParsedTable {
+  headers: string[];
+  rows: string[][];
+  rawMarkdown: string;
+}
+
+export function parseMarkdownTables(markdown: string): ParsedTable[] {
+  const tables: ParsedTable[] = [];
+  const lines = markdown.split('\n');
+  let currentTableLines: string[] = [];
+  let inCodeBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith('```')) {
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+    if (inCodeBlock) continue;
+
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      currentTableLines.push(trimmed);
+    } else {
+      if (currentTableLines.length >= 2) {
+        processTable(currentTableLines, tables);
+      }
+      currentTableLines = [];
+    }
+  }
+
+  if (currentTableLines.length >= 2) {
+    processTable(currentTableLines, tables);
+  }
+
+  return tables;
+}
+
+function processTable(tableLines: string[], tables: ParsedTable[]) {
+  // Check if second line is a delimiter | --- | --- |
+  if (tableLines.length < 2) return;
+  const headerLine = tableLines[0];
+  const delimiterLine = tableLines[1];
+
+  if (!delimiterLine.includes('-')) return;
+
+  const parseRow = (line: string) => {
+    return line
+      .slice(1, -1)
+      .split('|')
+      .map(cell => cell.trim());
+  };
+
+  const headers = parseRow(headerLine);
+  const rows: string[][] = [];
+
+  for (let r = 2; r < tableLines.length; r++) {
+    const rowCells = parseRow(tableLines[r]);
+    // Match column count
+    while (rowCells.length < headers.length) rowCells.push('');
+    rows.push(rowCells.slice(0, headers.length));
+  }
+
+  tables.push({
+    headers,
+    rows,
+    rawMarkdown: tableLines.join('\n'),
+  });
+}
+
+export function generateMarkdownTable(rows: number, cols: number): string {
+  const numRows = Math.max(1, Math.min(rows, 50));
+  const numCols = Math.max(1, Math.min(cols, 20));
+
+  const headers = Array.from({ length: numCols }, (_, i) => `Header ${i + 1}`);
+  const headerRow = `| ${headers.join(' | ')} |`;
+  const delimiterRow = `| ${headers.map(() => '---').join(' | ')} |`;
+  
+  const dataRows: string[] = [];
+  for (let r = 0; r < numRows; r++) {
+    const cells = Array.from({ length: numCols }, (_, c) => `Cell ${r + 1},${c + 1}`);
+    dataRows.push(`| ${cells.join(' | ')} |`);
+  }
+
+  return `\n${headerRow}\n${delimiterRow}\n${dataRows.join('\n')}\n`;
+}
+
+export const extractHeadings = extractToc;
