@@ -97,6 +97,51 @@ export async function checkServerKeyStatus(force = false): Promise<ServerStatus>
   }
 }
 
+export interface OpenAiServerStatus {
+  available: boolean;
+  configured: boolean;
+  baseUrl: string | null;
+  defaultModel: string | null;
+}
+
+let openAiServerCache: OpenAiServerStatus | null = null;
+
+export async function checkOpenAiServerStatus(force = false): Promise<OpenAiServerStatus> {
+  if (openAiServerCache && !force) return openAiServerCache;
+
+  const fallback: OpenAiServerStatus = { available: false, configured: false, baseUrl: null, defaultModel: null };
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch('/api/openai/status', { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) {
+      openAiServerCache = fallback;
+      return fallback;
+    }
+    const text = await res.text();
+    if (!text.trimStart().startsWith('{')) {
+      openAiServerCache = fallback;
+      return fallback;
+    }
+    const data = JSON.parse(text);
+    if (typeof data.configured !== 'boolean') {
+      openAiServerCache = fallback;
+      return fallback;
+    }
+    openAiServerCache = {
+      available: true,
+      configured: data.configured,
+      baseUrl: data.baseUrl || null,
+      defaultModel: data.defaultModel || null,
+    };
+    return openAiServerCache;
+  } catch {
+    openAiServerCache = fallback;
+    return fallback;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Error classification (ported from server.ts, Vietnamese UX)         */
 /* ------------------------------------------------------------------ */
@@ -401,13 +446,36 @@ async function geminiDirectStream(params: ExecuteAiActionParams, apiKey: string,
 
 /* ------------------------------------------------------------------ */
 /* OpenAI-compatible branch                                            */
+/*                                                                     */
+/* Routing: a personal key (stored client-side) always calls the user's */
+/* endpoint DIRECTLY from the browser — this also makes local endpoints */
+/* such as Ollama work, and keeps the personal key off our server.      */
+/* Without a personal key, a server that has OPENAI_BASE_URL +          */
+/* OPENAI_API_KEY configured proxies the call so a shared key can be    */
+/* used without ever reaching the browser.                             */
 /* ------------------------------------------------------------------ */
 
 function normalizeBaseUrl(baseUrl: string): string {
   return (baseUrl || '').trim().replace(/\/+$/, '');
 }
 
-async function openaiGenerate(params: ExecuteAiActionParams, apiKey: string, baseUrl: string): Promise<string> {
+const NO_OPENAI_KEY_ERROR =
+  'Chưa cấu hình OpenAI-compatible. Hãy mở Cài đặt nhập API Key cá nhân, hoặc cấu hình OPENAI_BASE_URL + OPENAI_API_KEY phía server.';
+
+interface OpenAiRequestContext {
+  systemInstruction: string;
+  prompt: string;
+  model: string;
+}
+
+function openAiMessages(ctx: OpenAiRequestContext) {
+  return [
+    { role: 'system', content: ctx.systemInstruction },
+    { role: 'user', content: ctx.prompt },
+  ];
+}
+
+async function openaiDirectGenerate(params: ExecuteAiActionParams, apiKey: string, baseUrl: string): Promise<string> {
   const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
   const model = (params.model || '').trim();
 
@@ -435,7 +503,7 @@ async function openaiGenerate(params: ExecuteAiActionParams, apiKey: string, bas
   return (data?.choices?.[0]?.message?.content || '').trim();
 }
 
-async function openaiStream(
+async function openaiDirectStream(
   params: ExecuteAiActionParams,
   apiKey: string,
   baseUrl: string,
@@ -472,6 +540,65 @@ async function openaiStream(
     const content = parsed?.choices?.[0]?.delta?.content;
     return typeof content === 'string' ? content : '';
   });
+}
+
+async function openaiServerGenerate(params: ExecuteAiActionParams, server: OpenAiServerStatus): Promise<string> {
+  const ctx = { ...buildInstructionAndPrompt(params), model: (params.model || '').trim() || server.defaultModel || '' };
+
+  const res = await fetch('/api/openai/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: openAiMessages(ctx), model: ctx.model }),
+  });
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok || data?.error) {
+    throw new Error(data?.error || `Lỗi từ server proxy (HTTP ${res.status}).`);
+  }
+  return (data?.choices?.[0]?.message?.content || '').trim();
+}
+
+async function openaiServerStream(
+  params: ExecuteAiActionParams,
+  server: OpenAiServerStatus,
+  hooks: StreamHooks
+): Promise<string> {
+  const ctx = { ...buildInstructionAndPrompt(params), model: (params.model || '').trim() || server.defaultModel || '' };
+
+  const response = await fetch('/api/openai/chat-stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: openAiMessages(ctx), model: ctx.model }),
+    signal: hooks.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error ${response.status}`);
+  }
+
+  // Server passes upstream OpenAI SSE through verbatim.
+  return consumeSse(response, hooks, (parsed) => {
+    if (parsed?.error) throw new Error(parsed.error.message || 'OpenAI-compatible API error');
+    const content = parsed?.choices?.[0]?.delta?.content;
+    return typeof content === 'string' ? content : '';
+  });
+}
+
+async function resolveOpenAiRoute(params: ExecuteAiActionParams): Promise<
+  | { mode: 'direct'; apiKey: string; baseUrl: string }
+  | { mode: 'server'; server: OpenAiServerStatus }
+> {
+  const personalKey = await getSecret('openai');
+  if (personalKey) {
+    return { mode: 'direct', apiKey: personalKey, baseUrl: params.baseUrl || 'https://api.openai.com/v1' };
+  }
+
+  const server = await checkOpenAiServerStatus();
+  if (server.available && server.configured) {
+    return { mode: 'server', server };
+  }
+
+  throw new Error(NO_OPENAI_KEY_ERROR);
 }
 
 /* ------------------------------------------------------------------ */
@@ -556,12 +683,11 @@ export async function executeAiAction(params: ExecuteAiActionParams): Promise<st
   const provider = params.provider || 'gemini';
 
   if (provider === 'openai') {
-    const apiKey = await getSecret('openai');
-    if (!apiKey) {
-      throw new Error('Chưa cấu hình API Key cho nhà cung cấp OpenAI-compatible. Hãy mở Cài đặt để nhập key.');
+    const route = await resolveOpenAiRoute(params);
+    if (route.mode === 'direct') {
+      return openaiDirectGenerate(params, route.apiKey, route.baseUrl);
     }
-    const baseUrl = params.baseUrl || 'https://api.openai.com/v1';
-    return openaiGenerate(params, apiKey, baseUrl);
+    return openaiServerGenerate(params, route.server);
   }
 
   // Gemini: prefer the server proxy when one is present (shared key stays server-side)
@@ -598,12 +724,11 @@ export async function executeAiActionStream(params: ExecuteAiActionStreamParams)
 
   try {
     if (provider === 'openai') {
-      const apiKey = await getSecret('openai');
-      if (!apiKey) {
-        throw new Error('Chưa cấu hình API Key cho nhà cung cấp OpenAI-compatible. Hãy mở Cài đặt để nhập key.');
+      const route = await resolveOpenAiRoute(rest);
+      if (route.mode === 'direct') {
+        return await openaiDirectStream(rest, route.apiKey, route.baseUrl, hooks);
       }
-      const baseUrl = rest.baseUrl || 'https://api.openai.com/v1';
-      return await openaiStream(rest, apiKey, baseUrl, hooks);
+      return await openaiServerStream(rest, route.server, hooks);
     }
 
     const server = await checkServerKeyStatus();
@@ -705,5 +830,37 @@ export async function testOpenAiApiKey(
       message:
         'Không kết nối được tới endpoint. Kiểm tra Base URL, key, và đảm bảo endpoint cho phép gọi trực tiếp từ trình duyệt (CORS).',
     };
+  }
+}
+
+/**
+ * Test the SERVER-side OpenAI-compatible configuration (OPENAI_BASE_URL +
+ * OPENAI_API_KEY) through the proxy — used when no personal key is set.
+ */
+export async function testServerOpenAiConfig(): Promise<{ success: boolean; message: string }> {
+  try {
+    const server = await checkOpenAiServerStatus(true);
+    if (!server.available || !server.configured) {
+      return { success: false, message: 'Server chưa cấu hình OpenAI-compatible.' };
+    }
+
+    const res = await fetch('/api/openai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'Respond with the single word: OK' }],
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || data?.error) {
+      return { success: false, message: data?.error || `Lỗi từ server proxy (HTTP ${res.status}).` };
+    }
+    const text = (data?.choices?.[0]?.message?.content || '').trim();
+    return {
+      success: true,
+      message: `Server proxy kết nối thành công tới ${server.baseUrl}${server.defaultModel ? ` (model: ${server.defaultModel})` : ''} — phản hồi: "${text.slice(0, 40)}".`,
+    };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Không kiểm tra được cấu hình server.' };
   }
 }

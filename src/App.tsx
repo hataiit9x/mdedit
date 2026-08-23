@@ -50,6 +50,7 @@ import { openLocalFile, saveToLocalFile } from './services/fileSystemService';
 import {
   executeAiActionStream,
   checkServerKeyStatus,
+  checkOpenAiServerStatus,
 } from './services/aiService';
 import { hasSecret, setSecret } from './services/secureKeyStore';
 import {
@@ -134,6 +135,7 @@ export default function App() {
     hasPersonalKey: false,
     serverAvailable: false,
     hasServerKey: false,
+    openaiConfigured: false,
   });
 
   // Modals state
@@ -182,14 +184,16 @@ export default function App() {
 
   const refreshAiKeyState = useCallback(async () => {
     const secretName = settings.aiProvider === 'openai' ? 'openai' : 'gemini';
-    const [hasPersonalKey, server] = await Promise.all([
+    const [hasPersonalKey, server, openaiServer] = await Promise.all([
       hasSecret(secretName),
       checkServerKeyStatus(),
+      checkOpenAiServerStatus(),
     ]);
     setAiKeyState({
       hasPersonalKey,
       serverAvailable: server.available,
       hasServerKey: server.hasServerKey,
+      openaiConfigured: openaiServer.available && openaiServer.configured,
     });
   }, [settings.aiProvider]);
 
@@ -979,7 +983,7 @@ export default function App() {
 
   const keyBadgeText = () => {
     if (settings.aiProvider === 'openai') {
-      return aiKeyState.hasPersonalKey ? 'OpenAI ✓' : 'OpenAI — chưa có key';
+      return aiKeyState.hasPersonalKey || aiKeyState.openaiConfigured ? 'OpenAI ✓' : 'OpenAI — chưa có key';
     }
     if (aiKeyState.serverAvailable && aiKeyState.hasServerKey) {
       return 'Key server an toàn';
@@ -1306,7 +1310,7 @@ export default function App() {
                 onClick={() => setIsSettingsOpen(true)}
                 className={`flex items-center gap-1 px-2 py-0.5 rounded-lg border transition-colors text-[10px] cursor-pointer shadow-2xs ${
                   settings.aiProvider === 'openai'
-                    ? aiKeyState.hasPersonalKey
+                    ? aiKeyState.hasPersonalKey || aiKeyState.openaiConfigured
                       ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
                       : 'border-amber-200 bg-amber-50 text-amber-700'
                     : aiKeyState.serverAvailable && aiKeyState.hasServerKey
@@ -1358,7 +1362,7 @@ export default function App() {
         openaiBaseUrl={settings.openaiBaseUrl}
         hasApiKey={
           settings.aiProvider === 'openai'
-            ? aiKeyState.hasPersonalKey
+            ? aiKeyState.hasPersonalKey || aiKeyState.openaiConfigured
             : (aiKeyState.serverAvailable && aiKeyState.hasServerKey) || aiKeyState.hasPersonalKey
         }
         language={settings.language || 'vi'}

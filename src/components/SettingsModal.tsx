@@ -24,7 +24,9 @@ import { translations } from '../utils/i18n';
 import {
   testGeminiApiKey,
   testOpenAiApiKey,
+  testServerOpenAiConfig,
   checkServerKeyStatus,
+  checkOpenAiServerStatus,
   AVAILABLE_MODELS,
 } from '../services/aiService';
 import {
@@ -68,6 +70,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [geminiKeySaved, setGeminiKeySaved] = useState(false);
   const [openaiKeySaved, setOpenaiKeySaved] = useState(false);
   const [serverStatus, setServerStatus] = useState<{ available: boolean; hasServerKey: boolean } | null>(null);
+  const [openaiServer, setOpenaiServer] = useState<{
+    available: boolean;
+    configured: boolean;
+    baseUrl: string | null;
+    defaultModel: string | null;
+  } | null>(null);
 
   const [language, setLanguage] = useState<Language>(settings.language || 'vi');
   const [fontSize, setFontSize] = useState(settings.fontSize || 15);
@@ -103,6 +111,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       hasSecret('gemini').then(setGeminiKeySaved);
       hasSecret('openai').then(setOpenaiKeySaved);
       checkServerKeyStatus(true).then(setServerStatus);
+      checkOpenAiServerStatus(true).then(setOpenaiServer);
       getStorageEstimate().then(setStorageStats);
     }
   }, [isOpen, settings]);
@@ -114,9 +123,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setTestResult(null);
     try {
       if (aiProvider === 'openai') {
-        const key = openaiKeyInput.trim() || (await getSecret('openai'));
-        const res = await testOpenAiApiKey(key, openaiBaseUrl, openaiModel);
-        setTestResult(res);
+        if (openaiKeyInput.trim() || openaiKeySaved) {
+          // Personal key: test it directly against the configured endpoint
+          const key = openaiKeyInput.trim() || (await getSecret('openai'));
+          const res = await testOpenAiApiKey(key, openaiBaseUrl, openaiModel);
+          setTestResult(res);
+        } else if (openaiServer?.available && openaiServer.configured) {
+          // No personal key: test the server's shared configuration
+          const res = await testServerOpenAiConfig();
+          setTestResult(res);
+        } else {
+          setTestResult({ success: false, message: 'Chưa nhập API Key cá nhân và server cũng chưa cấu hình OpenAI.' });
+        }
       } else {
         const key = geminiKeyInput.trim() || (await getSecret('gemini'));
         const res = await testGeminiApiKey(key, selectedModel);
@@ -461,6 +479,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {/* OpenAI-compatible configuration */}
               {aiProvider === 'openai' && (
                 <>
+                  {/* Server status (hybrid) */}
+                  <div
+                    className={`p-3 rounded-xl border flex items-start gap-2 ${
+                      openaiServer?.available && openaiServer.configured
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                        : openaiServer?.available
+                        ? 'border-amber-200 bg-amber-50 text-amber-800'
+                        : 'border-slate-200 bg-slate-50 text-slate-600'
+                    }`}
+                  >
+                    <Server className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>
+                      {openaiServer?.available && openaiServer.configured
+                        ? `Server đã cấu hình OpenAI-compatible — endpoint ${openaiServer.baseUrl}${
+                            openaiServer.defaultModel ? `, model mặc định ${openaiServer.defaultModel}` : ''
+                          }. Không cần key cá nhân (key dùng chung nằm an toàn phía server).`
+                        : openaiServer?.available
+                        ? 'Có server nhưng chưa cấu hình OPENAI_BASE_URL + OPENAI_API_KEY phía server — cần key cá nhân bên dưới.'
+                        : 'Không có server — AI sẽ gọi thẳng endpoint bằng API key cá nhân (BYOK) bên dưới.'}
+                    </span>
+                  </div>
+
                   <div className="space-y-2">
                     <label className="font-semibold text-slate-800 flex items-center gap-1.5">
                       <Globe className="w-4 h-4 text-emerald-600" />
@@ -499,7 +539,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div className="space-y-2">
                     <label className="font-semibold text-slate-800 flex items-center gap-1.5">
                       <Key className="w-4 h-4 text-emerald-600" />
-                      <span>API Key</span>
+                      <span>API Key cá nhân (tùy chọn khi server đã cấu hình)</span>
                     </label>
                     <div className="flex gap-2">
                       <div className="relative flex-1">
@@ -535,7 +575,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                       <button
                         onClick={handleTestKey}
-                        disabled={isTestingKey || (!openaiKeyInput.trim() && !openaiKeySaved)}
+                        disabled={
+                          isTestingKey ||
+                          (!openaiKeyInput.trim() && !openaiKeySaved && !(openaiServer?.available && openaiServer.configured))
+                        }
                         className="px-4 py-2.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-semibold transition-colors disabled:opacity-40 flex items-center gap-1.5 cursor-pointer shadow-xs"
                       >
                         {isTestingKey ? (

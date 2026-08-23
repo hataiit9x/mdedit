@@ -8,7 +8,8 @@ dotenv.config();
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  // Cloud Run injects PORT; keep 3000 for local dev.
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Cloud Run terminates TLS in front of the app: honour X-Forwarded-For so
   // the rate limiter below sees the real client IP.
@@ -16,14 +17,14 @@ async function startServer() {
 
   app.use(express.json({ limit: "10mb" }));
 
-  // Simple in-memory rate limit for the AI proxy: without it, the shared
-  // GEMINI_API_KEY on a public deployment could be drained by anyone who
-  // finds the URL. No external dependency needed at this scale.
+  // Simple in-memory rate limit for the AI proxies: without it, shared API
+  // keys on a public deployment could be drained by anyone who finds the
+  // URL. No external dependency needed at this scale.
   const RATE_LIMIT_WINDOW_MS = 60_000;
   const RATE_LIMIT_MAX_REQUESTS = 30;
   const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 
-  app.use("/api/gemini", (_req, res, next) => {
+  app.use("/api", (_req, res, next) => {
     const ip = _req.ip || _req.socket?.remoteAddress || "unknown";
     const now = Date.now();
     const bucket = rateBuckets.get(ip);
@@ -291,7 +292,8 @@ async function startServer() {
     res.setHeader("X-Accel-Buffering", "no");
 
     let isClosed = false;
-    req.on("close", () => {
+    // See the OpenAI stream endpoint: res 'close', not req 'close'.
+    res.on("close", () => {
       isClosed = true;
     });
 
@@ -382,6 +384,151 @@ async function startServer() {
         );
         res.end();
       }
+    }
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* OpenAI-compatible proxy (shared server-side key via env)          */
+  /*                                                                    */
+  /* Configure with: OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL.     */
+  /* Works with OpenAI, OpenRouter, Groq, DeepSeek, or any endpoint     */
+  /* exposing POST {base}/chat/completions. Note: a LOCAL endpoint      */
+  /* such as Ollama is only reachable when the server runs locally —    */
+  /* from a Cloud Run deployment "localhost" is the Cloud Run host.     */
+  /* ---------------------------------------------------------------- */
+
+  const OPENAI_BASE_URL = (process.env.OPENAI_BASE_URL || "").trim().replace(/\/+$/, "");
+  const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
+  const OPENAI_MODEL = (process.env.OPENAI_MODEL || "").trim();
+
+  app.get("/api/openai/status", (_req, res) => {
+    res.json({
+      configured: Boolean(OPENAI_BASE_URL && OPENAI_API_KEY),
+      baseUrl: OPENAI_BASE_URL || null,
+      defaultModel: OPENAI_MODEL || null,
+    });
+  });
+
+  const extractUpstreamError = (bodyText: string): string => {
+    try {
+      const parsed = JSON.parse(bodyText);
+      return parsed?.error?.message || parsed?.message || "";
+    } catch {
+      return bodyText.slice(0, 300);
+    }
+  };
+
+  app.post("/api/openai/chat", async (req, res) => {
+    try {
+      const { messages, model } = req.body || {};
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({ error: "Thiếu nội dung yêu cầu (messages)." });
+      }
+      if (!OPENAI_BASE_URL || !OPENAI_API_KEY) {
+        return res.status(400).json({
+          error:
+            "Server chưa cấu hình OpenAI-compatible (OPENAI_BASE_URL + OPENAI_API_KEY). Hãy nhập API Key cá nhân trong Cài đặt.",
+        });
+      }
+
+      const upstream = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          messages,
+          model: (model || "").trim() || OPENAI_MODEL || undefined,
+        }),
+      });
+
+      const text = await upstream.text();
+      if (!upstream.ok) {
+        return res.status(upstream.status).json({
+          error: extractUpstreamError(text) || `Endpoint trả về lỗi (${upstream.status}).`,
+        });
+      }
+
+      try {
+        res.status(200).json(JSON.parse(text));
+      } catch {
+        return res.status(502).json({ error: "Endpoint trả về phản hồi không hợp lệ." });
+      }
+    } catch (err: any) {
+      console.error("OpenAI proxy error:", err?.message || err);
+      res.status(502).json({
+        error: "Không kết nối được endpoint OpenAI-compatible. Kiểm tra OPENAI_BASE_URL trên server.",
+      });
+    }
+  });
+
+  // Streaming proxy: upstream SSE bytes are passed through verbatim so the
+  // client keeps its standard choices[0].delta.content parsing.
+  app.post("/api/openai/chat-stream", async (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+
+    const sendError = (message: string) => {
+      res.write(`data: ${JSON.stringify({ error: { message } })}\n\n`);
+      res.end();
+    };
+
+    const { messages, model } = req.body || {};
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return sendError("Thiếu nội dung yêu cầu (messages).");
+    }
+    if (!OPENAI_BASE_URL || !OPENAI_API_KEY) {
+      return sendError(
+        "Server chưa cấu hình OpenAI-compatible. Hãy nhập API Key cá nhân trong Cài đặt."
+      );
+    }
+
+    const abortController = new AbortController();
+    // NB: listen on the RESPONSE 'close' — since Node 16, req 'close' fires
+    // as soon as the request body has been consumed, which would abort the
+    // upstream fetch before a single byte is streamed.
+    res.on("close", () => {
+      if (!res.writableEnded) abortController.abort();
+    });
+
+    try {
+      const upstream = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          messages,
+          stream: true,
+          model: (model || "").trim() || OPENAI_MODEL || undefined,
+        }),
+        signal: abortController.signal,
+      });
+
+      if (!upstream.ok || !upstream.body) {
+        const text = await upstream.text().catch(() => "");
+        return sendError(extractUpstreamError(text) || `Endpoint trả về lỗi (${upstream.status}).`);
+      }
+
+      const reader = upstream.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) res.write(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      res.end();
+    } catch (err: any) {
+      if (abortController.signal.aborted) return;
+      console.error("OpenAI stream proxy error:", err?.message || err);
+      sendError("Không kết nối được endpoint OpenAI-compatible trong lúc streaming.");
     }
   });
 
