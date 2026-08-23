@@ -9,27 +9,24 @@ import {
   File,
   X,
   Check,
-  Sparkles,
 } from 'lucide-react';
 import { Language } from '../types';
 import { translations } from '../utils/i18n';
+import { exportAsMarkdown, exportAsPlainText } from '../services/exportService';
 import {
-  exportAsMarkdown,
-  exportAsPlainText,
-  exportAsHtml,
-  exportAsPdf,
-  exportAsPng,
-  exportTablesToSpreadsheet,
-  exportAsDocx,
-} from '../services/exportService';
+  exportToHtml,
+  exportToPdf,
+  exportToDocx,
+  exportToPng,
+  exportToExcel,
+  exportToCsv,
+} from '../services/exportUtils';
 
 interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   documentTitle: string;
   documentContent: string;
-  previewElementRef: React.RefObject<HTMLDivElement | null>;
-  isDark?: boolean;
   language: Language;
 }
 
@@ -38,7 +35,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   onClose,
   documentTitle,
   documentContent,
-  previewElementRef,
   language,
 }) => {
   const t = translations[language].export;
@@ -55,8 +51,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
     try {
       if (type === 'pdf') {
-        exportAsPdf();
-        setSuccessMessage('Đã mở hộp thoại in / lưu PDF của hệ thống.');
+        const ok = await exportToPdf(documentTitle, documentContent);
+        if (ok) {
+          setSuccessMessage('Đã mở hộp thoại in / lưu PDF của hệ thống.');
+        } else {
+          setErrorMessage('Trình duyệt đã chặn cửa sổ bật lên. Hãy cho phép popup rồi thử lại.');
+        }
       } else if (type === 'md') {
         exportAsMarkdown(documentTitle, documentContent);
         setSuccessMessage('Đã tải xuống tệp .md thành công.');
@@ -64,30 +64,31 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         exportAsPlainText(documentTitle, documentContent);
         setSuccessMessage('Đã tải xuống tệp .txt thành công.');
       } else if (type === 'html') {
-        if (!previewElementRef.current) {
-          throw new Error('Chưa tìm thấy khung xem trước');
-        }
-        exportAsHtml(documentTitle, previewElementRef.current);
+        await exportToHtml(documentTitle, documentContent);
         setSuccessMessage('Đã tải xuống tệp .html độc lập thành công.');
       } else if (type === 'docx') {
-        await exportAsDocx(documentTitle, documentContent);
-        setSuccessMessage('Đã tạo và tải xuống tệp Microsoft Word .docx.');
-      } else if (type === 'png') {
-        if (!previewElementRef.current) {
-          throw new Error('Chưa tìm thấy khung xem trước');
-        }
-        const success = await exportAsPng(documentTitle, previewElementRef.current, false);
-        if (success) {
-          setSuccessMessage('Đã chụp và tải ảnh PNG xem trước thành công.');
+        const ok = await exportToDocx(documentTitle, documentContent);
+        if (ok) {
+          setSuccessMessage('Đã tạo và tải xuống tệp Microsoft Word .docx.');
         } else {
-          setErrorMessage('Không thể chụp ảnh bản xem trước.');
+          setErrorMessage('Không thể tạo tệp Word.');
+        }
+      } else if (type === 'png') {
+        const ok = await exportToPng(documentTitle, documentContent);
+        if (ok) {
+          setSuccessMessage('Đã xuất ảnh PNG độ phân giải cao thành công.');
+        } else {
+          setErrorMessage('Không thể xuất ảnh PNG.');
         }
       } else if (type === 'xlsx' || type === 'csv') {
-        const success = exportTablesToSpreadsheet(documentTitle, documentContent, type);
-        if (!success) {
-          setErrorMessage('Không tìm thấy bảng Markdown nào trong tài liệu này.');
+        const ok =
+          type === 'xlsx'
+            ? await exportToExcel(documentTitle, documentContent)
+            : await exportToCsv(documentTitle, documentContent);
+        if (ok) {
+          setSuccessMessage(`Đã xuất nội dung ra định dạng .${type.toUpperCase()} thành công.`);
         } else {
-          setSuccessMessage(`Đã xuất bảng ra định dạng .${type.toUpperCase()} thành công.`);
+          setErrorMessage('Không có nội dung nào để xuất.');
         }
       }
     } catch (err: any) {

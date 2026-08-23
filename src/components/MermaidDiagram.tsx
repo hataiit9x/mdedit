@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import mermaid from 'mermaid';
+import DOMPurify from 'dompurify';
 import { Copy, Check, AlertCircle, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 
 interface MermaidDiagramProps {
@@ -21,7 +22,10 @@ export default function MermaidDiagram({ code, isDark = false }: MermaidDiagramP
       mermaid.initialize({
         startOnLoad: false,
         theme: 'default',
-        securityLevel: 'loose',
+        // 'strict' escapes HTML inside diagram labels; combined with the
+        // DOMPurify pass below this keeps user-authored diagrams from
+        // injecting markup into the page.
+        securityLevel: 'strict',
         fontFamily: 'inherit',
         themeVariables: {
           darkMode: false,
@@ -40,7 +44,7 @@ export default function MermaidDiagram({ code, isDark = false }: MermaidDiagramP
         .render(id, code.trim())
         .then(({ svg }) => {
           if (isMounted) {
-            setSvgContent(svg);
+            setSvgContent(DOMPurify.sanitize(svg, { ADD_ATTR: ['viewBox'] }));
             setError(null);
           }
         })

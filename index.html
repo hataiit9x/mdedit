@@ -1,18 +1,19 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MDEdit — Privacy-First Markdown Editor & Gemini AI Assistant</title>
-    <meta name="description" content="A free, open-source, privacy-first local Markdown editor with an AI writing assistant powered by Gemini API." />
-    <!-- KaTeX CSS -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
-    <!-- Highlight.js Github Dark Theme -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <title>MDEdit — Trình soạn thảo Markdown & Trợ lý AI bảo mật</title>
+    <meta
+      name="description"
+      content="Trình soạn thảo Markdown 100% cục bộ trên trình duyệt, tích hợp trợ lý viết AI đa nhà cung cấp và xuất đa định dạng (PDF, DOCX, HTML, PNG, Excel)."
+    />
+    <meta name="referrer" content="no-referrer" />
+    <!-- KaTeX / highlight.js CSS now ship from npm packages via src imports,
+         so the app renders math & code correctly even when offline. -->
   </head>
-  <body class="bg-[#0c0c0e] text-[#e1e1e1] antialiased overflow-hidden">
+  <body class="bg-slate-100 text-slate-800 antialiased overflow-hidden">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

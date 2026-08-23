@@ -10,7 +10,45 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Cloud Run terminates TLS in front of the app: honour X-Forwarded-For so
+  // the rate limiter below sees the real client IP.
+  app.set("trust proxy", true);
+
   app.use(express.json({ limit: "10mb" }));
+
+  // Simple in-memory rate limit for the AI proxy: without it, the shared
+  // GEMINI_API_KEY on a public deployment could be drained by anyone who
+  // finds the URL. No external dependency needed at this scale.
+  const RATE_LIMIT_WINDOW_MS = 60_000;
+  const RATE_LIMIT_MAX_REQUESTS = 30;
+  const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+  app.use("/api/gemini", (_req, res, next) => {
+    const ip = _req.ip || _req.socket?.remoteAddress || "unknown";
+    const now = Date.now();
+    const bucket = rateBuckets.get(ip);
+
+    if (!bucket || bucket.resetAt < now) {
+      // Opportunistic cleanup so the map cannot grow unbounded
+      if (rateBuckets.size > 10_000) {
+        for (const [key, value] of rateBuckets) {
+          if (value.resetAt < now) rateBuckets.delete(key);
+        }
+      }
+      rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+      return next();
+    }
+
+    bucket.count += 1;
+    if (bucket.count > RATE_LIMIT_MAX_REQUESTS) {
+      res.setHeader("Retry-After", Math.ceil((bucket.resetAt - now) / 1000));
+      res.status(429).json({
+        error: "Quá nhiều yêu cầu AI trong một phút. Vui lòng thử lại sau ít phút.",
+      });
+      return;
+    }
+    next();
+  });
 
   // Check server API key status
   app.get("/api/gemini/status", (_req, res) => {
@@ -355,6 +393,32 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
+    // Production hardening: a strict CSP keeps injected/inline scripts from
+    // executing even if an XSS slips through the client-side sanitisation.
+    // connect-src still allows https endpoints so the browser can call
+    // Gemini / OpenAI-compatible providers directly (BYOK mode), plus
+    // localhost for self-hosted endpoints such as Ollama.
+    app.use((_req, res, next) => {
+      res.setHeader(
+        "Content-Security-Policy",
+        [
+          "default-src 'self'",
+          "script-src 'self'",
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data: blob: https:",
+          "font-src 'self' data:",
+          "connect-src 'self' https: http://localhost:* http://127.0.0.1:*",
+          "object-src 'none'",
+          "base-uri 'self'",
+          "form-action 'self'",
+          "frame-ancestors 'none'",
+        ].join("; ")
+      );
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      next();
+    });
+
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {

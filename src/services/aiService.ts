@@ -1,4 +1,21 @@
-import { AiActionType, TranslationTargetLanguage } from '../types';
+// Multi-provider AI service — no backend required.
+//
+// Provider "gemini" (hybrid):
+//   - If the app is served by server.ts (AI Studio deploy / `npm run dev`),
+//     requests go through /api/gemini/* so a shared server-side key can be
+//     used and never reaches the browser.
+//   - Otherwise the browser calls Google's REST API directly with the user's
+//     personal key (BYOK), sent only via the `x-goog-api-key` header.
+//
+// Provider "openai": any OpenAI-compatible endpoint (OpenAI, OpenRouter,
+// Groq, DeepSeek, Ollama, ...) configured in Settings, called directly with
+// `Authorization: Bearer` — the wire format mirrors ref/mdtools-main.
+//
+// API keys are read from secureKeyStore (session-only or AES-GCM encrypted),
+// never from query strings, never logged.
+
+import { AiActionType, TranslationTargetLanguage, AiProvider } from '../types';
+import { getSecret } from './secureKeyStore';
 
 export const AI_SYSTEM_INSTRUCTIONS: Record<AiActionType, string | ((lang: string) => string)> = {
   improve:
@@ -28,39 +45,171 @@ export const AVAILABLE_MODELS = [
   { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', badge: 'Advanced Reasoning & Logic' },
 ];
 
-export async function testGeminiApiKey(apiKey: string, model: string = 'gemini-3.7-flash'): Promise<{ success: boolean; message: string }> {
+const NO_KEY_ERROR =
+  'Chưa cấu hình API Key. Hãy mở Cài đặt và nhập API Key cá nhân (BYOK), hoặc chạy ứng dụng cùng server để dùng key dùng chung.';
+
+/* ------------------------------------------------------------------ */
+/* Server detection (hybrid)                                           */
+/* ------------------------------------------------------------------ */
+
+export interface ServerStatus {
+  available: boolean;
+  hasServerKey: boolean;
+  defaultModel: string;
+}
+
+let serverStatusCache: ServerStatus | null = null;
+
+export async function checkServerKeyStatus(force = false): Promise<ServerStatus> {
+  if (serverStatusCache && !force) return serverStatusCache;
+
+  const fallback: ServerStatus = { available: false, hasServerKey: false, defaultModel: 'gemini-3.7-flash' };
   try {
-    const res = await fetch('/api/gemini/test-key', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-gemini-api-key': apiKey.trim(),
-      },
-      body: JSON.stringify({ apiKey: apiKey.trim(), model }),
-    });
-
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to connect to Gemini API');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch('/api/gemini/status', { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) {
+      serverStatusCache = fallback;
+      return fallback;
     }
-
-    return { success: true, message: data.message || 'Key is valid!' };
-  } catch (err: any) {
-    return { success: false, message: err.message || 'Network error while testing key' };
+    // A static SPA fallback also answers 200 with an HTML document — only a
+    // strict JSON body with the expected shape counts as "server present".
+    const text = await res.text();
+    if (!text.trimStart().startsWith('{')) {
+      serverStatusCache = fallback;
+      return fallback;
+    }
+    const data = JSON.parse(text);
+    if (typeof data.hasServerKey !== 'boolean') {
+      serverStatusCache = fallback;
+      return fallback;
+    }
+    serverStatusCache = {
+      available: true,
+      hasServerKey: data.hasServerKey,
+      defaultModel: data.defaultModel || 'gemini-3.7-flash',
+    };
+    return serverStatusCache;
+  } catch {
+    serverStatusCache = fallback;
+    return fallback;
   }
 }
 
-export async function checkServerKeyStatus(): Promise<{ hasServerKey: boolean; defaultModel: string }> {
-  try {
-    const res = await fetch('/api/gemini/status');
-    if (res.ok) {
-      return await res.json();
-    }
-  } catch (e) {
-    console.warn('Could not check server API key status', e);
-  }
-  return { hasServerKey: false, defaultModel: 'gemini-3.7-flash' };
+/* ------------------------------------------------------------------ */
+/* Error classification (ported from server.ts, Vietnamese UX)         */
+/* ------------------------------------------------------------------ */
+
+interface AiErrorDetails {
+  message: string;
+  isQuota: boolean;
+  isInvalidKey: boolean;
+  isTransient: boolean;
 }
+
+export function classifyAiError(rawMsg: string, statusCode = 0): AiErrorDetails {
+  let msg = String(rawMsg || '');
+  let code = statusCode;
+
+  try {
+    const jsonStart = msg.indexOf('{');
+    if (jsonStart !== -1) {
+      const jsonEnd = msg.lastIndexOf('}');
+      if (jsonEnd > jsonStart) {
+        const parsed = JSON.parse(msg.slice(jsonStart, jsonEnd + 1));
+        if (parsed?.error?.message) msg = parsed.error.message;
+        if (parsed?.error?.code) code = parsed.error.code;
+        if (parsed?.error?.status === 'RESOURCE_EXHAUSTED') code = 429;
+      }
+    }
+  } catch {
+    /* keep original message */
+  }
+
+  const lower = msg.toLowerCase();
+  const isQuota =
+    code === 429 ||
+    lower.includes('prepayment credits are depleted') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('quota') ||
+    lower.includes('rate limit') ||
+    lower.includes('credits are depleted') ||
+    lower.includes('too many requests') ||
+    lower.includes('billing');
+
+  const isInvalidKey =
+    code === 400 ||
+    code === 401 ||
+    code === 403 ||
+    lower.includes('api_key_invalid') ||
+    lower.includes('api key not valid') ||
+    lower.includes('permission_denied') ||
+    lower.includes('unauthenticated') ||
+    lower.includes('unauthorized') ||
+    lower.includes('forbidden') ||
+    lower.includes('incorrect api key');
+
+  const isTransient =
+    !isQuota &&
+    !isInvalidKey &&
+    (code === 500 ||
+      code === 502 ||
+      code === 503 ||
+      lower.includes('503') ||
+      lower.includes('high demand') ||
+      lower.includes('temporarily unavailable') ||
+      lower.includes('try again later') ||
+      lower.includes('overloaded'));
+
+  let message = msg || 'Lỗi không xác định khi gọi AI.';
+  if (isQuota) {
+    message =
+      'Tài khoản hoặc API Key đã hết lượt sử dụng (quota / rate limit - mã 429). Bạn có thể tạo API Key cá nhân miễn phí tại https://aistudio.google.com/app/apikey, dán vào mục Cài đặt, hoặc chuyển sang nhà cung cấp OpenAI-compatible khác.';
+  } else if (isInvalidKey) {
+    message = 'API Key không hợp lệ hoặc không có quyền truy cập. Vui lòng kiểm tra lại API Key trong mục Cài đặt.';
+  } else if (isTransient) {
+    message = 'Hệ thống AI đang quá tải tạm thời. Vui lòng thử lại sau vài giây hoặc đổi mô hình khác trong Cài đặt.';
+  }
+
+  return { message, isQuota, isInvalidKey, isTransient };
+}
+
+/* ------------------------------------------------------------------ */
+/* Model resolution (mirrors server.ts)                                */
+/* ------------------------------------------------------------------ */
+
+const FALLBACK_MODELS: Record<string, string[]> = {
+  'gemini-3.7-flash': ['gemini-3.6-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
+  'gemini-3.6-flash': ['gemini-3.7-flash', 'gemini-3.1-flash-lite'],
+  'gemini-3.1-flash-lite': ['gemini-3.7-flash', 'gemini-3.6-flash'],
+  'gemini-3.1-pro-preview': ['gemini-3.7-flash', 'gemini-3.6-flash'],
+};
+
+function resolveModelName(inputModel?: string): string {
+  const normalized = (inputModel || '').trim();
+  if (!normalized || ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-flash'].includes(normalized)) {
+    return 'gemini-3.7-flash';
+  }
+  if (['gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-pro'].includes(normalized)) {
+    return 'gemini-3.1-pro-preview';
+  }
+  if (['gemini-flash-lite', 'gemini-lite'].includes(normalized)) {
+    return 'gemini-3.1-flash-lite';
+  }
+  return normalized;
+}
+
+function getCandidateModels(primary: string): string[] {
+  const fallbacks = FALLBACK_MODELS[primary] || ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.1-flash-lite'];
+  return [primary, ...fallbacks.filter((m) => m !== primary)];
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/* ------------------------------------------------------------------ */
+/* Prompt construction                                                 */
+/* ------------------------------------------------------------------ */
 
 export interface ExecuteAiActionParams {
   action: AiActionType;
@@ -68,15 +217,12 @@ export interface ExecuteAiActionParams {
   targetLanguage?: TranslationTargetLanguage;
   customPrompt?: string;
   model?: string;
-  apiKey?: string;
+  provider?: AiProvider;
+  baseUrl?: string;
 }
 
-export async function executeAiAction(params: ExecuteAiActionParams): Promise<string> {
-  const { action, text, targetLanguage = 'English', customPrompt, model = 'gemini-3.7-flash', apiKey } = params;
-
-  if (!text || !text.trim()) {
-    throw new Error('Please select or provide text for the AI assistant to process.');
-  }
+function buildInstructionAndPrompt(params: ExecuteAiActionParams): { systemInstruction: string; prompt: string } {
+  const { action, text, targetLanguage = 'English', customPrompt } = params;
 
   let systemInstruction: string;
   if (action === 'translate') {
@@ -88,108 +234,272 @@ export async function executeAiAction(params: ExecuteAiActionParams): Promise<st
     systemInstruction = AI_SYSTEM_INSTRUCTIONS[action] as string;
   }
 
-  const prompt = action === 'custom' && customPrompt ? `Instructions: ${customPrompt}\n\nInput Text:\n${text}` : text;
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  if (apiKey && apiKey.trim()) {
-    headers['x-gemini-api-key'] = apiKey.trim();
+  // Extra instructions ride along with any action, not only 'custom'.
+  if (customPrompt && action !== 'custom') {
+    systemInstruction += `\nAdditionally, follow these user instructions: "${customPrompt}"`;
   }
+
+  const prompt = action === 'custom' && customPrompt ? `Instructions: ${customPrompt}\n\nInput Text:\n${text}` : text;
+  return { systemInstruction, prompt };
+}
+
+function requireText(text: string): Error | null {
+  if (!text || !text.trim()) {
+    return new Error('Please select or provide text for the AI assistant to process.');
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Gemini: server-proxy branch                                         */
+/* ------------------------------------------------------------------ */
+
+async function geminiServerGenerate(params: ExecuteAiActionParams, apiKey: string): Promise<string> {
+  const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['x-gemini-api-key'] = apiKey;
 
   const res = await fetch('/api/gemini/action', {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      prompt,
-      systemInstruction,
-      model,
-      apiKey: apiKey?.trim(),
-    }),
+    body: JSON.stringify({ prompt, systemInstruction, model: params.model }),
   });
 
   const data = await res.json();
   if (!res.ok || data.error) {
     throw new Error(data.error || 'Gemini API call failed.');
   }
-
   return (data.result || '').trim();
 }
 
-export interface ExecuteAiActionStreamParams extends ExecuteAiActionParams {
+async function geminiServerStream(
+  params: ExecuteAiActionParams,
+  apiKey: string,
+  hooks: StreamHooks
+): Promise<string> {
+  const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['x-gemini-api-key'] = apiKey;
+
+  const response = await fetch('/api/gemini/action-stream', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ prompt, systemInstruction, model: params.model }),
+    signal: hooks.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error ${response.status}`);
+  }
+
+  return consumeSse(response, hooks, (parsed) => {
+    // server.ts emits its own envelope: { text } | { error } | { done }
+    if (parsed.error) throw new Error(parsed.error);
+    return typeof parsed.text === 'string' ? parsed.text : '';
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Gemini: direct REST branch (BYOK, no server)                        */
+/* ------------------------------------------------------------------ */
+
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+async function geminiDirectGenerate(params: ExecuteAiActionParams, apiKey: string): Promise<string> {
+  const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
+  const primary = resolveModelName(params.model);
+  let lastError: AiErrorDetails | null = null;
+
+  for (const model of getCandidateModels(primary)) {
+    try {
+      const res = await fetch(`${GEMINI_BASE}/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
+        }),
+      });
+
+      if (!res.ok) {
+        const bodyText = await res.text();
+        throw new Error(withStatus(bodyText || `HTTP ${res.status}`, res.status));
+      }
+
+      const data = await res.json();
+      const text =
+        data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || '').join('') || '';
+      return text.trim();
+    } catch (err: any) {
+      const details = classifyAiError(err?.message || String(err), err?.status || parseStatus(err?.message));
+      lastError = details;
+      if (details.isQuota || details.isInvalidKey) throw new Error(details.message);
+      // transient or unknown: try the next fallback model
+    }
+  }
+
+  throw new Error(lastError?.message || 'Không thể tạo phản hồi từ Gemini AI.');
+}
+
+async function geminiDirectStream(params: ExecuteAiActionParams, apiKey: string, hooks: StreamHooks): Promise<string> {
+  const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
+  const primary = resolveModelName(params.model);
+  let lastError: AiErrorDetails | null = null;
+
+  for (const model of getCandidateModels(primary)) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(
+          `${GEMINI_BASE}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': apiKey,
+            },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }],
+              ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
+            }),
+            signal: hooks.signal,
+          }
+        );
+
+        if (!res.ok) {
+          const bodyText = await res.text();
+          throw new Error(withStatus(bodyText || `HTTP ${res.status}`, res.status));
+        }
+
+        return await consumeSse(res, hooks, (parsed) => {
+          if (parsed?.error) throw new Error(parsed.error.message || 'Gemini API error');
+          // Native Gemini SSE: candidates[0].content.parts[].text
+          const parts = parsed?.candidates?.[0]?.content?.parts;
+          if (Array.isArray(parts)) {
+            return parts.map((p: { text?: string }) => p.text || '').join('');
+          }
+          return '';
+        });
+      } catch (err: any) {
+        if (hooks.signal?.aborted) return '';
+        const details = classifyAiError(err?.message || String(err), parseStatus(err?.message));
+        lastError = details;
+        if (details.isQuota || details.isInvalidKey) throw new Error(details.message);
+        if (details.isTransient && attempt === 0) {
+          await delay(400 * Math.pow(2, attempt));
+          continue;
+        }
+        break; // try next fallback model
+      }
+    }
+  }
+
+  throw new Error(lastError?.message || 'Không thể tạo phản hồi từ Gemini AI.');
+}
+
+/* ------------------------------------------------------------------ */
+/* OpenAI-compatible branch                                            */
+/* ------------------------------------------------------------------ */
+
+function normalizeBaseUrl(baseUrl: string): string {
+  return (baseUrl || '').trim().replace(/\/+$/, '');
+}
+
+async function openaiGenerate(params: ExecuteAiActionParams, apiKey: string, baseUrl: string): Promise<string> {
+  const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
+  const model = (params.model || '').trim();
+
+  const res = await fetch(`${normalizeBaseUrl(baseUrl)}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemInstruction },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    const bodyText = await res.text();
+    throw new Error(withStatus(bodyText || `HTTP ${res.status}`, res.status));
+  }
+
+  const data = await res.json();
+  return (data?.choices?.[0]?.message?.content || '').trim();
+}
+
+async function openaiStream(
+  params: ExecuteAiActionParams,
+  apiKey: string,
+  baseUrl: string,
+  hooks: StreamHooks
+): Promise<string> {
+  const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
+  const model = (params.model || '').trim();
+
+  const res = await fetch(`${normalizeBaseUrl(baseUrl)}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemInstruction },
+        { role: 'user', content: prompt },
+      ],
+      stream: true,
+    }),
+    signal: hooks.signal,
+  });
+
+  if (!res.ok) {
+    const bodyText = await res.text();
+    throw new Error(withStatus(bodyText || `HTTP ${res.status}`, res.status));
+  }
+
+  return consumeSse(res, hooks, (parsed) => {
+    if (parsed?.error) throw new Error(parsed.error.message || 'OpenAI-compatible API error');
+    // OpenAI wire format (same as ref/mdtools-main): choices[0].delta.content
+    const content = parsed?.choices?.[0]?.delta?.content;
+    return typeof content === 'string' ? content : '';
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* SSE consumption                                                     */
+/* ------------------------------------------------------------------ */
+
+interface StreamHooks {
   onChunk: (chunkText: string, accumulated: string) => void;
   onDone?: (finalText: string) => void;
   onError?: (error: Error) => void;
   signal?: AbortSignal;
 }
 
-export async function executeAiActionStream(params: ExecuteAiActionStreamParams): Promise<string> {
-  const {
-    action,
-    text,
-    targetLanguage = 'English',
-    customPrompt,
-    model = 'gemini-3.7-flash',
-    apiKey,
-    onChunk,
-    onDone,
-    onError,
-    signal,
-  } = params;
-
-  if (!text || !text.trim()) {
-    const err = new Error('Please select or provide text for the AI assistant to process.');
-    if (onError) onError(err);
-    throw err;
+async function consumeSse(
+  response: Response,
+  hooks: StreamHooks,
+  extractText: (parsed: any) => string
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('Response body is not readable');
   }
 
-  let systemInstruction: string;
-  if (action === 'translate') {
-    const fn = AI_SYSTEM_INSTRUCTIONS.translate as (lang: string) => string;
-    systemInstruction = fn(targetLanguage);
-  } else if (action === 'custom' && customPrompt) {
-    systemInstruction = `You are an expert Markdown writing assistant. The user wants you to: "${customPrompt}". Return only the refined markdown content.`;
-  } else {
-    systemInstruction = AI_SYSTEM_INSTRUCTIONS[action] as string;
-  }
-
-  const prompt = action === 'custom' && customPrompt ? `Instructions: ${customPrompt}\n\nInput Text:\n${text}` : text;
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  if (apiKey && apiKey.trim()) {
-    headers['x-gemini-api-key'] = apiKey.trim();
-  }
+  const decoder = new TextDecoder();
+  let accumulated = '';
+  let buffer = '';
 
   try {
-    const response = await fetch('/api/gemini/action-stream', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        prompt,
-        systemInstruction,
-        model,
-        apiKey: apiKey?.trim(),
-      }),
-      signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error ${response.status}`);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error('Response body is not readable');
-    }
-
-    const decoder = new TextDecoder();
-    let accumulated = '';
-    let buffer = '';
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -202,36 +512,198 @@ export async function executeAiActionStream(params: ExecuteAiActionStreamParams)
         const trimmed = line.trim();
         if (!trimmed.startsWith('data:')) continue;
         const jsonStr = trimmed.substring(5).trim();
-        if (!jsonStr) continue;
+        if (!jsonStr || jsonStr === '[DONE]') continue;
 
         try {
           const parsed = JSON.parse(jsonStr);
-          if (parsed.error) {
-            throw new Error(parsed.error);
-          }
-          if (parsed.text) {
-            accumulated += parsed.text;
-            onChunk(parsed.text, accumulated);
-          }
-          if (parsed.done) {
-            // Stream complete
+          const text = extractText(parsed);
+          if (text) {
+            accumulated += text;
+            hooks.onChunk(text, accumulated);
           }
         } catch (e: any) {
-          if (e.message && !e.message.startsWith('Unexpected token')) {
+          if (e && e.message && !e.message.startsWith('Unexpected token')) {
             throw e;
           }
         }
       }
     }
+  } finally {
+    reader.releaseLock?.();
+  }
 
-    if (onDone) onDone(accumulated);
-    return accumulated;
+  if (hooks.onDone) hooks.onDone(accumulated);
+  return accumulated;
+}
+
+function withStatus(message: string, status: number): string {
+  return `[status:${status}] ${message}`;
+}
+
+function parseStatus(message: string): number {
+  const m = String(message || '').match(/\[status:(\d+)\]/);
+  return m ? Number(m[1]) : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Public API                                                          */
+/* ------------------------------------------------------------------ */
+
+export async function executeAiAction(params: ExecuteAiActionParams): Promise<string> {
+  const empty = requireText(params.text);
+  if (empty) throw empty;
+
+  const provider = params.provider || 'gemini';
+
+  if (provider === 'openai') {
+    const apiKey = await getSecret('openai');
+    if (!apiKey) {
+      throw new Error('Chưa cấu hình API Key cho nhà cung cấp OpenAI-compatible. Hãy mở Cài đặt để nhập key.');
+    }
+    const baseUrl = params.baseUrl || 'https://api.openai.com/v1';
+    return openaiGenerate(params, apiKey, baseUrl);
+  }
+
+  // Gemini: prefer the server proxy when one is present (shared key stays server-side)
+  const server = await checkServerKeyStatus();
+  const apiKey = await getSecret('gemini');
+  if (server.available) {
+    return geminiServerGenerate(params, apiKey);
+  }
+
+  if (!apiKey) {
+    throw new Error(NO_KEY_ERROR);
+  }
+  return geminiDirectGenerate(params, apiKey);
+}
+
+export interface ExecuteAiActionStreamParams extends ExecuteAiActionParams {
+  onChunk: (chunkText: string, accumulated: string) => void;
+  onDone?: (finalText: string) => void;
+  onError?: (error: Error) => void;
+  signal?: AbortSignal;
+}
+
+export async function executeAiActionStream(params: ExecuteAiActionStreamParams): Promise<string> {
+  const { onChunk, onDone, onError, signal, ...rest } = params;
+  const hooks: StreamHooks = { onChunk, onDone, onError, signal };
+
+  const empty = requireText(rest.text);
+  if (empty) {
+    onError?.(empty);
+    throw empty;
+  }
+
+  const provider = rest.provider || 'gemini';
+
+  try {
+    if (provider === 'openai') {
+      const apiKey = await getSecret('openai');
+      if (!apiKey) {
+        throw new Error('Chưa cấu hình API Key cho nhà cung cấp OpenAI-compatible. Hãy mở Cài đặt để nhập key.');
+      }
+      const baseUrl = rest.baseUrl || 'https://api.openai.com/v1';
+      return await openaiStream(rest, apiKey, baseUrl, hooks);
+    }
+
+    const server = await checkServerKeyStatus();
+    const apiKey = await getSecret('gemini');
+    if (server.available) {
+      return await geminiServerStream(rest, apiKey, hooks);
+    }
+
+    if (!apiKey) {
+      throw new Error(NO_KEY_ERROR);
+    }
+    return await geminiDirectStream(rest, apiKey, hooks);
   } catch (err: any) {
     if (signal?.aborted) {
       return '';
     }
-    if (onError) onError(err);
+    onError?.(err);
     throw err;
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Key testing                                                         */
+/* ------------------------------------------------------------------ */
+
+export async function testGeminiApiKey(
+  apiKey: string,
+  model: string = 'gemini-3.7-flash'
+): Promise<{ success: boolean; message: string }> {
+  const key = apiKey.trim();
+  try {
+    const server = await checkServerKeyStatus();
+    if (server.available) {
+      const res = await fetch('/api/gemini/test-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(key ? { 'x-gemini-api-key': key } : {}) },
+        body: JSON.stringify({ apiKey: key, model }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, message: data.error || 'Failed to connect to Gemini API' };
+      }
+      return { success: true, message: data.message || 'Key is valid!' };
+    }
+
+    if (!key) {
+      return { success: false, message: NO_KEY_ERROR };
+    }
+
+    const res = await fetch(`${GEMINI_BASE}/${encodeURIComponent(resolveModelName(model))}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Respond with the single word: OK' }] }] }),
+    });
+    if (!res.ok) {
+      const bodyText = await res.text();
+      const details = classifyAiError(bodyText, res.status);
+      return { success: false, message: details.message };
+    }
+    return { success: true, message: `Đã kết nối thành công tới Gemini (${resolveModelName(model)})!` };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Network error while testing key' };
+  }
+}
+
+export async function testOpenAiApiKey(
+  apiKey: string,
+  baseUrl: string,
+  model?: string
+): Promise<{ success: boolean; message: string }> {
+  const key = apiKey.trim();
+  const base = normalizeBaseUrl(baseUrl);
+  try {
+    if (!base) {
+      return { success: false, message: 'Chưa nhập Base URL.' };
+    }
+    if (!key) {
+      return { success: false, message: 'Chưa nhập API Key.' };
+    }
+
+    const res = await fetch(`${base}/models`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!res.ok) {
+      const bodyText = await res.text();
+      const details = classifyAiError(bodyText, res.status);
+      return { success: false, message: details.message };
+    }
+    const data = await res.json().catch(() => null);
+    const modelCount = Array.isArray(data?.data) ? data.data.length : 0;
+    const modelNote = model ? ` — model: ${model}` : '';
+    return {
+      success: true,
+      message: `Kết nối thành công! Endpoint phản hồi ${modelCount > 0 ? `${modelCount} model` : 'OK'}${modelNote}.`,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message:
+        'Không kết nối được tới endpoint. Kiểm tra Base URL, key, và đảm bảo endpoint cho phép gọi trực tiếp từ trình duyệt (CORS).',
+    };
+  }
+}

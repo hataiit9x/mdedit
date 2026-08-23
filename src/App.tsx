@@ -1,27 +1,20 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 import {
   Menu,
-  FilePlus,
   Save,
   Sparkles,
   Download,
   ListTree,
-  Sliders,
   Keyboard,
   Maximize2,
   Minimize2,
   Columns,
   SquareCode,
   Eye,
-  Search,
   FolderOpen,
   CheckCircle2,
   Key,
-  ShieldCheck,
-  Languages,
-  Sun,
-  HardDrive,
-  FileCheck,
   Square,
   ChevronDown,
   Info,
@@ -35,12 +28,10 @@ import {
   FolderItem,
   AppSettings,
   ViewMode,
-  Language,
   AiActionType,
   TranslationTargetLanguage,
 } from './types';
 import {
-  db,
   getSettings,
   saveSettings,
   getAllDocuments,
@@ -56,16 +47,25 @@ import {
 import { extractHeadings, calculateStats } from './utils/markdownUtils';
 import { translations } from './utils/i18n';
 import { openLocalFile, saveToLocalFile } from './services/fileSystemService';
-import { executeAiActionStream } from './services/aiService';
+import {
+  executeAiActionStream,
+  checkServerKeyStatus,
+} from './services/aiService';
+import { hasSecret, setSecret } from './services/secureKeyStore';
 import {
   exportAsMarkdown,
   exportAsPlainText,
-  exportAsHtml,
-  exportAsPdf,
-  exportAsPng,
-  exportTablesToSpreadsheet,
-  exportAsDocx,
 } from './services/exportService';
+import {
+  exportToHtml,
+  exportToPdf,
+  exportToDocx,
+  exportToPng,
+  exportToExcel,
+  exportToCsv,
+  copyHtmlToClipboard,
+} from './services/exportUtils';
+import { useHistory } from './hooks/useHistory';
 
 // Subcomponents
 import { Sidebar } from './components/Sidebar';
@@ -81,26 +81,32 @@ import { FindReplaceModal } from './components/FindReplaceModal';
 import { TableGeneratorModal } from './components/TableGeneratorModal';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { OnboardingModal } from './components/OnboardingModal';
+import { GoToLineDialog } from './components/GoToLineDialog';
+
+const INITIAL_SETTINGS: AppSettings = {
+  selectedModel: 'gemini-3.7-flash',
+  aiProvider: 'gemini',
+  openaiBaseUrl: 'https://api.openai.com/v1',
+  openaiModel: 'gpt-4o-mini',
+  rememberApiKeys: false,
+  language: 'vi',
+  theme: 'light',
+  fontSize: 15,
+  fontFamily: 'sans',
+  lineNumbers: true,
+  wordWrap: true,
+  syncScroll: true,
+  autoSaveIntervalMs: 2000,
+  hasSeenOnboarding: false,
+  defaultPaneMode: 'split',
+};
 
 export default function App() {
   // Database state
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [currentDoc, setCurrentDoc] = useState<DocumentItem | null>(null);
-  const [settings, setSettings] = useState<AppSettings>({
-    geminiApiKey: '',
-    selectedModel: 'gemini-3.7-flash',
-    theme: 'light',
-    language: 'vi',
-    fontSize: 15,
-    fontFamily: 'sans',
-    lineNumbers: true,
-    wordWrap: true,
-    syncScroll: true,
-    autoSaveIntervalMs: 2000,
-    hasSeenOnboarding: false,
-    defaultPaneMode: 'split',
-  });
+  const [settings, setSettings] = useState<AppSettings>(INITIAL_SETTINGS);
 
   // UI state
   const [viewMode, setViewMode] = useState<ViewMode>('split');
@@ -120,10 +126,15 @@ export default function App() {
   const [selectedText, setSelectedText] = useState('');
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
 
-  // History stack for Undo/Redo
-  const [historyStack, setHistoryStack] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const isUndoRedoAction = useRef(false);
+  // Editor history (time-coalesced undo/redo)
+  const editorHistory = useHistory('', { maxHistory: 200, coalesceMs: 500 });
+
+  // AI key availability (keys themselves live in secureKeyStore)
+  const [aiKeyState, setAiKeyState] = useState({
+    hasPersonalKey: false,
+    serverAvailable: false,
+    hasServerKey: false,
+  });
 
   // Modals state
   const [isAiModalOpen, setIsAiModalOpen] = useState(false);
@@ -133,6 +144,7 @@ export default function App() {
   const [isTableModalOpen, setIsTableModalOpen] = useState(false);
   const [isShortcutsOpen, setIsShortcutsOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isGoToLineOpen, setIsGoToLineOpen] = useState(false);
 
   // In-Editor AI Streaming state
   const [isAiStreaming, setIsAiStreaming] = useState(false);
@@ -144,6 +156,10 @@ export default function App() {
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const isScrollingSync = useRef(false);
+
+  // Debounced autosave bookkeeping
+  const saveTimerRef = useRef<number | null>(null);
+  const pendingSaveRef = useRef<{ docId: string; content: string } | null>(null);
 
   const t = translations[settings.language || 'vi'];
 
@@ -164,25 +180,67 @@ export default function App() {
     }, duration);
   };
 
-  // Direct Export actions (Gemini AI style)
-  const handleDirectExportPdf = () => {
+  const refreshAiKeyState = useCallback(async () => {
+    const secretName = settings.aiProvider === 'openai' ? 'openai' : 'gemini';
+    const [hasPersonalKey, server] = await Promise.all([
+      hasSecret(secretName),
+      checkServerKeyStatus(),
+    ]);
+    setAiKeyState({
+      hasPersonalKey,
+      serverAvailable: server.available,
+      hasServerKey: server.hasServerKey,
+    });
+  }, [settings.aiProvider]);
+
+  useEffect(() => {
+    refreshAiKeyState();
+  }, [refreshAiKeyState, settings.rememberApiKeys, isSettingsOpen]);
+
+  const flushPendingSave = useCallback(async () => {
+    if (saveTimerRef.current !== null) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    const pending = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+    if (pending) {
+      await updateDocument(pending.docId, { content: pending.content });
+      setIsSavedRecently(true);
+      setTimeout(() => setIsSavedRecently(false), 2000);
+    }
+  }, []);
+
+  // Best-effort save when the tab is being closed
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      void flushPendingSave();
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [flushPendingSave]);
+
+  /* ---------------------------------------------------------------- */
+  /* Export handlers (client-side exportUtils pipeline)                */
+  /* ---------------------------------------------------------------- */
+
+  const handleDirectExportPdf = async () => {
+    if (!currentDoc) return;
     showToast('Đang mở hộp thoại in / xuất PDF...', 'info');
-    exportAsPdf();
+    const ok = await exportToPdf(currentDoc.title, currentDoc.content);
+    if (!ok) {
+      showToast('Trình duyệt đã chặn cửa sổ bật lên — hãy cho phép popup rồi thử lại.', 'error');
+    }
   };
 
   const handleDirectExportWord = async () => {
     if (!currentDoc) return;
     showToast('Đang tạo tệp Microsoft Word (.docx)...', 'info');
-    try {
-      const ok = await exportAsDocx(currentDoc.title, currentDoc.content);
-      if (ok) {
-        showToast('Đã tải xuống tệp Word (.docx) thành công!', 'success');
-      } else {
-        showToast('Không thể tạo tệp Word.', 'error');
-      }
-    } catch (e: any) {
-      showToast(e.message || 'Lỗi khi xuất Word.', 'error');
-    }
+    const ok = await exportToDocx(currentDoc.title, currentDoc.content);
+    showToast(
+      ok ? 'Đã tải xuống tệp Word (.docx) thành công!' : 'Không thể tạo tệp Word.',
+      ok ? 'success' : 'error'
+    );
   };
 
   const handleDirectExportMarkdown = () => {
@@ -191,47 +249,43 @@ export default function App() {
     showToast('Đã tải xuống tệp Markdown (.md) thành công!', 'success');
   };
 
-  const handleDirectExportHtml = () => {
-    if (!currentDoc || !previewRef.current) {
-      showToast('Chưa có nội dung xem trước để xuất HTML.', 'error');
-      return;
+  const handleDirectExportHtml = async () => {
+    if (!currentDoc) return;
+    showToast('Đang tạo tệp HTML độc lập...', 'info');
+    try {
+      await exportToHtml(currentDoc.title, currentDoc.content);
+      showToast('Đã tải xuống tệp HTML độc lập (.html) thành công!', 'success');
+    } catch {
+      showToast('Không thể xuất HTML.', 'error');
     }
-    exportAsHtml(currentDoc.title, previewRef.current);
-    showToast('Đã tải xuống tệp HTML độc lập (.html) thành công!', 'success');
   };
 
   const handleDirectExportPng = async () => {
-    if (!currentDoc || !previewRef.current) {
-      showToast('Chưa có nội dung xem trước để chụp ảnh.', 'error');
-      return;
-    }
-    showToast('Đang xử lý ảnh PNG xem trước...', 'info');
-    const ok = await exportAsPng(currentDoc.title, previewRef.current, false);
-    if (ok) {
-      showToast('Đã tải ảnh PNG xem trước thành công!', 'success');
-    } else {
-      showToast('Không thể chụp ảnh bản xem trước.', 'error');
-    }
+    if (!currentDoc) return;
+    showToast('Đang xử lý ảnh PNG...', 'info');
+    const ok = await exportToPng(currentDoc.title, currentDoc.content);
+    showToast(
+      ok ? 'Đã xuất ảnh PNG độ phân giải cao thành công!' : 'Không thể xuất ảnh PNG.',
+      ok ? 'success' : 'error'
+    );
   };
 
-  const handleDirectExportExcel = () => {
+  const handleDirectExportExcel = async () => {
     if (!currentDoc) return;
-    const ok = exportTablesToSpreadsheet(currentDoc.title, currentDoc.content, 'xlsx');
-    if (ok) {
-      showToast('Đã xuất bảng ra tệp Excel (.xlsx) thành công!', 'success');
-    } else {
-      showToast('Không tìm thấy bảng Markdown trong tài liệu này.', 'error');
-    }
+    const ok = await exportToExcel(currentDoc.title, currentDoc.content);
+    showToast(
+      ok ? 'Đã xuất nội dung ra tệp Excel (.xlsx) thành công!' : 'Không có nội dung nào để xuất.',
+      ok ? 'success' : 'error'
+    );
   };
 
-  const handleDirectExportCsv = () => {
+  const handleDirectExportCsv = async () => {
     if (!currentDoc) return;
-    const ok = exportTablesToSpreadsheet(currentDoc.title, currentDoc.content, 'csv');
-    if (ok) {
-      showToast('Đã xuất bảng ra tệp CSV (.csv) thành công!', 'success');
-    } else {
-      showToast('Không tìm thấy bảng Markdown trong tài liệu này.', 'error');
-    }
+    const ok = await exportToCsv(currentDoc.title, currentDoc.content);
+    showToast(
+      ok ? 'Đã xuất nội dung ra tệp CSV thành công!' : 'Không có nội dung nào để xuất.',
+      ok ? 'success' : 'error'
+    );
   };
 
   const handleDirectExportPlainText = () => {
@@ -240,20 +294,32 @@ export default function App() {
     showToast('Đã tải xuống tệp văn bản thuần (.txt) thành công!', 'success');
   };
 
-  const handleDirectCopyHtml = () => {
-    if (!previewRef.current) {
-      showToast('Chưa có nội dung xem trước để sao chép.', 'error');
-      return;
-    }
-    navigator.clipboard.writeText(previewRef.current.innerHTML);
-    showToast('Đã sao chép mã HTML vào clipboard!', 'success');
+  const handleDirectCopyHtml = async () => {
+    if (!currentDoc) return;
+    const ok = await copyHtmlToClipboard(currentDoc.content);
+    showToast(
+      ok ? 'Đã sao chép mã HTML vào clipboard!' : 'Không thể sao chép HTML.',
+      ok ? 'success' : 'error'
+    );
   };
 
-  // Initialize DB and settings
+  /* ---------------------------------------------------------------- */
+  /* Initialization                                                    */
+  /* ---------------------------------------------------------------- */
+
   const refreshData = useCallback(async () => {
     await initSampleData();
     const storedSettings = await getSettings();
+
+    // Migrate legacy plaintext key (old versions stored it in settings)
+    const legacyKey = (storedSettings as unknown as { geminiApiKey?: string }).geminiApiKey;
+    if (legacyKey && legacyKey.trim()) {
+      await setSecret('gemini', legacyKey, false);
+      await saveSettings({ geminiApiKey: '' } as unknown as Partial<AppSettings>);
+    }
+
     setSettings({ ...storedSettings, theme: 'light' });
+    setViewMode(storedSettings.defaultPaneMode || 'split');
 
     const docs = await getAllDocuments();
     const flds = await getAllFolders();
@@ -263,30 +329,45 @@ export default function App() {
     if (docs.length > 0) {
       const active = docs.find((d) => !d.isTrash) || docs[0];
       setCurrentDoc(active);
-      setHistoryStack([active.content]);
-      setHistoryIndex(0);
+      editorHistory.reset(active.content);
     }
 
     if (!storedSettings.hasSeenOnboarding) {
       setIsOnboardingOpen(true);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     refreshData();
   }, [refreshData]);
 
-  // Document selection
-  const handleSelectDoc = async (id: string) => {
+  /* ---------------------------------------------------------------- */
+  /* Document switching with pending-save flush                        */
+  /* ---------------------------------------------------------------- */
+
+  const switchToDoc = useCallback(
+    async (doc: DocumentItem | null) => {
+      await flushPendingSave();
+      setCurrentDoc(doc);
+      if (doc) {
+        editorHistory.reset(doc.content);
+      }
+    },
+    [flushPendingSave, editorHistory]
+  );
+
+  const handleSelectDoc = (id: string) => {
     const doc = documents.find((d) => d.id === id);
     if (doc) {
-      setCurrentDoc(doc);
-      setHistoryStack([doc.content]);
-      setHistoryIndex(0);
+      void switchToDoc(doc);
     }
   };
 
-  // Content change & auto-save to IndexedDB (debounced)
+  /* ---------------------------------------------------------------- */
+  /* Content change: state + coalesced history + debounced persistence */
+  /* ---------------------------------------------------------------- */
+
   const handleContentChange = useCallback(
     (newContent: string) => {
       if (!currentDoc) return;
@@ -297,57 +378,45 @@ export default function App() {
         updatedAt: Date.now(),
       };
       setCurrentDoc(updated);
+      setDocuments((prev) => prev.map((d) => (d.id === currentDoc.id ? updated : d)));
 
-      // Auto update history if not in undo/redo
-      if (!isUndoRedoAction.current) {
-        setHistoryStack((prev) => {
-          const next = prev.slice(0, historyIndex + 1);
-          return [...next, newContent];
-        });
-        setHistoryIndex((prev) => prev + 1);
+      editorHistory.set(newContent);
+
+      pendingSaveRef.current = { docId: currentDoc.id, content: newContent };
+      if (saveTimerRef.current !== null) {
+        clearTimeout(saveTimerRef.current);
       }
-      isUndoRedoAction.current = false;
-
-      // Update in documents list
-      setDocuments((prev) =>
-        prev.map((d) => (d.id === currentDoc.id ? updated : d))
-      );
-
-      // Debounced persist
-      updateDocument(currentDoc.id, { content: newContent }).then(() => {
-        setIsSavedRecently(true);
-        setTimeout(() => setIsSavedRecently(false), 2000);
-      });
+      const interval = Math.max(500, settings.autoSaveIntervalMs || 2000);
+      saveTimerRef.current = window.setTimeout(() => {
+        void flushPendingSave();
+      }, interval);
     },
-    [currentDoc, historyIndex]
+    [currentDoc, settings.autoSaveIntervalMs, editorHistory, flushPendingSave]
   );
 
-  // Title change
   const handleTitleChange = async (newTitle: string) => {
     if (!currentDoc) return;
     const updated = { ...currentDoc, title: newTitle, updatedAt: Date.now() };
     setCurrentDoc(updated);
-    setDocuments((prev) =>
-      prev.map((d) => (d.id === currentDoc.id ? updated : d))
-    );
+    setDocuments((prev) => prev.map((d) => (d.id === currentDoc.id ? updated : d)));
     await updateDocument(currentDoc.id, { title: newTitle });
   };
 
-  // Create new document
   const handleCreateDoc = async (folderId?: string | null) => {
     const newDoc = await createDocument({
       title: 'Tài liệu không tên',
-      content: `# Tài liệu mới\n\nBắt đầu soạn thảo nội dung với định dạng **Markdown** hoặc nhấn **Gemini AI** để được hỗ trợ viết...\n`,
+      content: `# Tài liệu mới\n\nBắt đầu soạn thảo nội dung với định dạng **Markdown** hoặc dùng **AI** để được hỗ trợ viết...\n`,
       folderId: folderId || null,
     });
     const all = await getAllDocuments();
     setDocuments(all);
-    setCurrentDoc(newDoc);
-    setHistoryStack([newDoc.content]);
-    setHistoryIndex(0);
+    await switchToDoc(newDoc);
   };
 
-  // Folders management
+  /* ---------------------------------------------------------------- */
+  /* Folders management                                                */
+  /* ---------------------------------------------------------------- */
+
   const handleCreateFolder = async (name: string) => {
     await createFolder(name);
     setFolders(await getAllFolders());
@@ -364,7 +433,10 @@ export default function App() {
     setDocuments(await getAllDocuments());
   };
 
-  // Document actions
+  /* ---------------------------------------------------------------- */
+  /* Document actions                                                  */
+  /* ---------------------------------------------------------------- */
+
   const handlePinDoc = async (id: string, isPinned: boolean) => {
     await updateDocument(id, { isPinned });
     setDocuments(await getAllDocuments());
@@ -382,9 +454,7 @@ export default function App() {
         folderId: original.folderId,
       });
       setDocuments(await getAllDocuments());
-      setCurrentDoc(copy);
-      setHistoryStack([copy.content]);
-      setHistoryIndex(0);
+      await switchToDoc(copy);
     }
   };
 
@@ -402,14 +472,13 @@ export default function App() {
     setDocuments(all);
     if (currentDoc?.id === id) {
       const active = all.find((d) => !d.isTrash);
-      setCurrentDoc(active || null);
+      await switchToDoc(active || null);
     }
   };
 
   const handleRestoreDoc = async (id: string) => {
     await updateDocument(id, { isTrash: false });
-    const all = await getAllDocuments();
-    setDocuments(all);
+    setDocuments(await getAllDocuments());
   };
 
   const handleDeleteDocPermanent = async (id: string) => {
@@ -418,7 +487,7 @@ export default function App() {
     setDocuments(all);
     if (currentDoc?.id === id) {
       const active = all.find((d) => !d.isTrash);
-      setCurrentDoc(active || null);
+      await switchToDoc(active || null);
     }
   };
 
@@ -435,10 +504,20 @@ export default function App() {
     setSettings(updated);
   };
 
-  // Markdown Formatting Toolbar Handler
+  /* ---------------------------------------------------------------- */
+  /* Formatting toolbar                                                */
+  /* ---------------------------------------------------------------- */
+
   const handleFormat = (action: string) => {
     const editor = editorRef.current;
     if (!editor) return;
+
+    const headingMatch = action.match(/^h([1-6])$/);
+    if (headingMatch) {
+      const level = parseInt(headingMatch[1], 10);
+      editor.wrapSelection('#'.repeat(level) + ' ', '\n', `Tiêu đề ${level}`);
+      return;
+    }
 
     switch (action) {
       case 'bold':
@@ -452,15 +531,6 @@ export default function App() {
         break;
       case 'code':
         editor.wrapSelection('`', '`', 'mã_inline');
-        break;
-      case 'h1':
-        editor.wrapSelection('# ', '\n', 'Tiêu đề 1');
-        break;
-      case 'h2':
-        editor.wrapSelection('## ', '\n', 'Tiêu đề 2');
-        break;
-      case 'h3':
-        editor.wrapSelection('### ', '\n', 'Tiêu đề 3');
         break;
       case 'quote':
         editor.wrapSelection('> ', '\n', 'Trích dẫn ghi chú');
@@ -499,7 +569,26 @@ export default function App() {
     }
   };
 
-  // Direct In-Editor AI Streaming Generation
+  const handleInsertSnippet = (snippet: string) => {
+    editorRef.current?.insertText(snippet);
+    editorRef.current?.focus();
+  };
+
+  const handleApplyTemplate = (content: string) => {
+    if (!currentDoc) return;
+    editorHistory.beginNewStep();
+    handleContentChange(content);
+    editorRef.current?.focus();
+    showToast('Đã áp dụng mẫu tài liệu — Ctrl+Z để hoàn tác.', 'info');
+  };
+
+  /* ---------------------------------------------------------------- */
+  /* AI streaming                                                      */
+  /* ---------------------------------------------------------------- */
+
+  const activeModel =
+    settings.aiProvider === 'openai' ? settings.openaiModel : settings.selectedModel || 'gemini-3.7-flash';
+
   const handleSelectAiAction = async (
     action: AiActionType,
     targetLanguage?: TranslationTargetLanguage
@@ -539,10 +628,11 @@ export default function App() {
     aiAbortControllerRef.current = abortController;
 
     const originalContent = currentDoc.content;
+    // One undo step for the whole AI burst, not one per streamed chunk
+    editorHistory.beginNewStep();
 
     try {
       if (hasSelection) {
-        // Selection mode: snapshot prefix & suffix cleanly
         const startPos = range.start;
         const oldLen = currentSelection.length;
         const prefix = originalContent.substring(0, startPos);
@@ -552,16 +642,15 @@ export default function App() {
           action,
           text: targetSourceText,
           targetLanguage,
-          model: settings.selectedModel || 'gemini-3.7-flash',
-          apiKey: settings.geminiApiKey,
+          model: activeModel,
+          provider: settings.aiProvider,
+          baseUrl: settings.aiProvider === 'openai' ? settings.openaiBaseUrl : undefined,
           signal: abortController.signal,
           onChunk: (_chunk, accumulated) => {
-            const newDocContent = prefix + accumulated + suffix;
-            handleContentChange(newDocContent);
+            handleContentChange(prefix + accumulated + suffix);
           },
         });
       } else if (action === 'continue' || action === 'expand') {
-        // Append mode: append stream directly to bottom of current doc
         const baseContent = originalContent.trimEnd();
         const prefix = baseContent ? baseContent + '\n\n' : '';
 
@@ -569,22 +658,22 @@ export default function App() {
           action,
           text: targetSourceText,
           targetLanguage,
-          model: settings.selectedModel || 'gemini-3.7-flash',
-          apiKey: settings.geminiApiKey,
+          model: activeModel,
+          provider: settings.aiProvider,
+          baseUrl: settings.aiProvider === 'openai' ? settings.openaiBaseUrl : undefined,
           signal: abortController.signal,
           onChunk: (_chunk, accumulated) => {
-            const newDocContent = prefix + accumulated;
-            handleContentChange(newDocContent);
+            handleContentChange(prefix + accumulated);
           },
         });
       } else {
-        // Full doc replacement mode
         await executeAiActionStream({
           action,
           text: targetSourceText,
           targetLanguage,
-          model: settings.selectedModel || 'gemini-3.7-flash',
-          apiKey: settings.geminiApiKey,
+          model: activeModel,
+          provider: settings.aiProvider,
+          baseUrl: settings.aiProvider === 'openai' ? settings.openaiBaseUrl : undefined,
           signal: abortController.signal,
           onChunk: (_chunk, accumulated) => {
             handleContentChange(accumulated);
@@ -593,18 +682,20 @@ export default function App() {
       }
       showToast(`Đã hoàn tất xử lý AI: ${actionLabels[action]}`, 'success');
     } catch (err: any) {
-      if (err.name === 'AbortError') {
+      if (err.name === 'AbortError' || abortController.signal.aborted) {
         showToast('Đã dừng xử lý AI.', 'info');
       } else {
-        const errorText = err.message || 'Lỗi xử lý Gemini AI';
+        const errorText = err.message || 'Lỗi xử lý AI';
         setAiStreamingError(errorText);
 
         const isQuotaOrKey =
           errorText.includes('429') ||
           errorText.includes('Quota') ||
+          errorText.includes('quota') ||
           errorText.includes('Credits') ||
           errorText.includes('Cài đặt') ||
-          errorText.includes('API Key');
+          errorText.includes('API Key') ||
+          errorText.includes('API key');
 
         if (isQuotaOrKey) {
           showToast(
@@ -634,36 +725,35 @@ export default function App() {
     setIsAiStreaming(false);
   };
 
-  // Undo / Redo
+  /* ---------------------------------------------------------------- */
+  /* Undo / Redo                                                       */
+  /* ---------------------------------------------------------------- */
+
+  const applyHistoryContent = (content: string) => {
+    if (!currentDoc) return;
+    const updated = { ...currentDoc, content };
+    setCurrentDoc(updated);
+    setDocuments((prev) => prev.map((d) => (d.id === currentDoc.id ? updated : d)));
+    pendingSaveRef.current = { docId: currentDoc.id, content };
+    void flushPendingSave();
+  };
+
   const handleUndo = () => {
-    if (historyIndex > 0) {
-      isUndoRedoAction.current = true;
-      const targetIndex = historyIndex - 1;
-      const targetContent = historyStack[targetIndex];
-      setHistoryIndex(targetIndex);
-      if (currentDoc) {
-        const updated = { ...currentDoc, content: targetContent };
-        setCurrentDoc(updated);
-        updateDocument(currentDoc.id, { content: targetContent });
-      }
+    if (editorHistory.undo()) {
+      applyHistoryContent(editorHistory.get());
     }
   };
 
   const handleRedo = () => {
-    if (historyIndex < historyStack.length - 1) {
-      isUndoRedoAction.current = true;
-      const targetIndex = historyIndex + 1;
-      const targetContent = historyStack[targetIndex];
-      setHistoryIndex(targetIndex);
-      if (currentDoc) {
-        const updated = { ...currentDoc, content: targetContent };
-        setCurrentDoc(updated);
-        updateDocument(currentDoc.id, { content: targetContent });
-      }
+    if (editorHistory.redo()) {
+      applyHistoryContent(editorHistory.get());
     }
   };
 
-  // Synchronized Scrolling
+  /* ---------------------------------------------------------------- */
+  /* Synchronized scrolling                                            */
+  /* ---------------------------------------------------------------- */
+
   const handleEditorScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
     if (!settings.syncScroll || isScrollingSync.current || !previewRef.current) return;
     isScrollingSync.current = true;
@@ -690,7 +780,6 @@ export default function App() {
     }, 50);
   };
 
-  // Selection change handler
   const handleSelectionChange = (text: string, start: number) => {
     setSelectedText(text);
     if (currentDoc) {
@@ -703,7 +792,45 @@ export default function App() {
     }
   };
 
-  // Keyboard Shortcuts listener
+  /* ---------------------------------------------------------------- */
+  /* Find/Replace navigation + Go to line                              */
+  /* ---------------------------------------------------------------- */
+
+  const currentContent = currentDoc?.content || '';
+
+  const handleNavigateMatch = useCallback(
+    (start: number, end: number) => {
+      const ed = editorRef.current;
+      if (!ed) return;
+      const ta = ed.getTextarea();
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(start, end);
+      const line = currentContent.substring(0, start).split('\n').length;
+      ed.scrollToLine(line);
+    },
+    [currentContent]
+  );
+
+  const handleGoToLine = (line: number) => {
+    const ed = editorRef.current;
+    if (!ed) return;
+    const ta = ed.getTextarea();
+    if (ta) {
+      const pos =
+        line > 1
+          ? currentContent.split('\n').slice(0, line - 1).join('\n').length + 1
+          : 0;
+      ta.setSelectionRange(pos, pos);
+      ta.focus();
+    }
+    ed.scrollToLine(line);
+  };
+
+  /* ---------------------------------------------------------------- */
+  /* Keyboard shortcuts                                                */
+  /* ---------------------------------------------------------------- */
+
   const handleGlobalKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
     const modifier = isMac ? e.metaKey : e.ctrlKey;
@@ -718,14 +845,14 @@ export default function App() {
       setIsFindModalOpen(true);
       return;
     }
+    if (modifier && (e.key === 'g' || e.key === 'G')) {
+      e.preventDefault();
+      setIsGoToLineOpen(true);
+      return;
+    }
     if (modifier && (e.key === 's' || e.key === 'S')) {
       e.preventDefault();
-      if (currentDoc) {
-        updateDocument(currentDoc.id, { content: currentDoc.content }).then(() => {
-          setIsSavedRecently(true);
-          setTimeout(() => setIsSavedRecently(false), 2000);
-        });
-      }
+      void flushPendingSave();
       return;
     }
     if (modifier && (e.key === 'b' || e.key === 'B')) {
@@ -741,6 +868,11 @@ export default function App() {
     if (modifier && (e.key === 'k' || e.key === 'K')) {
       e.preventDefault();
       handleFormat('link');
+      return;
+    }
+    if (modifier && e.key === '`') {
+      e.preventDefault();
+      handleFormat('code');
       return;
     }
     if (modifier && (e.key === 'z' || e.key === 'Z')) {
@@ -770,7 +902,10 @@ export default function App() {
     }
   };
 
-  // Open / Save from local disk using File System Access API
+  /* ---------------------------------------------------------------- */
+  /* File System (disk open/save)                                      */
+  /* ---------------------------------------------------------------- */
+
   const handleOpenFileFromDisk = async () => {
     const file = await openLocalFile();
     if (file) {
@@ -779,30 +914,28 @@ export default function App() {
         content: file.content,
       });
       setDocuments(await getAllDocuments());
-      setCurrentDoc(newDoc);
-      setHistoryStack([newDoc.content]);
-      setHistoryIndex(0);
+      await switchToDoc(newDoc);
     }
   };
 
   const handleSaveFileToDisk = async () => {
     if (!currentDoc) return;
+    await flushPendingSave();
     await saveToLocalFile(currentDoc.title, currentDoc.content);
   };
 
-  // Derived statistics and Table of Contents
-  const currentContent = currentDoc?.content || '';
+  /* ---------------------------------------------------------------- */
+  /* Derived data                                                      */
+  /* ---------------------------------------------------------------- */
+
   const stats = calculateStats(currentContent);
   const toc = extractHeadings(currentContent);
 
-  // Jump to heading in preview and editor
   const handleJumpToHeading = (slug: string, headingText?: string) => {
-    // 1. Scroll in preview pane
     const el = document.getElementById(slug);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-    // 2. Locate line in editor and scroll textarea
     if (editorRef.current && currentDoc && headingText) {
       const lines = currentDoc.content.split('\n');
       const cleanHeading = headingText.trim();
@@ -813,12 +946,53 @@ export default function App() {
     }
   };
 
+  /* ---------------------------------------------------------------- */
+  /* Render                                                            */
+  /* ---------------------------------------------------------------- */
+
+  const editorPane = (
+    <MarkdownEditor
+      ref={editorRef}
+      value={currentContent}
+      onChange={handleContentChange}
+      onSelectionChange={handleSelectionChange}
+      fontSize={settings.fontSize}
+      fontFamily={settings.fontFamily}
+      lineNumbers={settings.lineNumbers}
+      wordWrap={settings.wordWrap}
+      placeholder="Bắt đầu soạn thảo Markdown hoặc dùng AI..."
+      onScroll={handleEditorScroll}
+      onKeyDownShortcut={handleGlobalKeyDown}
+    />
+  );
+
+  const previewPane = (
+    <MarkdownPreview
+      ref={previewRef}
+      content={currentContent}
+      isDark={false}
+      fontSize={settings.fontSize}
+      fontFamily={settings.fontFamily}
+      onScroll={handlePreviewScroll}
+    />
+  );
+
+  const keyBadgeText = () => {
+    if (settings.aiProvider === 'openai') {
+      return aiKeyState.hasPersonalKey ? 'OpenAI ✓' : 'OpenAI — chưa có key';
+    }
+    if (aiKeyState.serverAvailable && aiKeyState.hasServerKey) {
+      return 'Key server an toàn';
+    }
+    return aiKeyState.hasPersonalKey ? 'BYOK Đã kết nối' : 'Chưa có key';
+  };
+
   return (
     <div
       id="mdedit-root"
       className="flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-800 font-sans"
     >
-      {/* 1. Collapsible Sidebar with Documents + Dedicated Tab of Contents */}
+      {/* 1. Collapsible Sidebar */}
       {!isFocusMode && isSidebarOpen && (
         <Sidebar
           isOpen={isSidebarOpen}
@@ -860,7 +1034,6 @@ export default function App() {
                 <Menu className="w-4 h-4" />
               </button>
 
-              {/* Document Title Input */}
               {currentDoc ? (
                 <div className="flex items-center gap-2 flex-1 max-w-md min-w-0">
                   <input
@@ -884,7 +1057,6 @@ export default function App() {
 
             {/* Top Right Actions */}
             <div className="flex items-center gap-1 sm:gap-2">
-              {/* File System (Disk Open / Save) */}
               <button
                 onClick={handleOpenFileFromDisk}
                 className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 text-slate-700 hover:text-indigo-700 bg-slate-50 hover:bg-indigo-50 text-xs font-semibold transition-all cursor-pointer shadow-xs"
@@ -956,7 +1128,7 @@ export default function App() {
                 <ListTree className="w-4 h-4 text-indigo-600" />
               </button>
 
-              {/* Export Menu Item (Gemini AI style) */}
+              {/* Export Menu */}
               <div className="relative inline-block">
                 <button
                   id="gemini-export-menu-trigger"
@@ -993,15 +1165,15 @@ export default function App() {
                 />
               </div>
 
-              {/* AI Assistant Big Action */}
+              {/* AI Assistant Modal Trigger */}
               <button
                 onClick={() => setIsAiModalOpen(true)}
                 className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 text-xs font-bold shadow-xs transition-all transform active:scale-95 cursor-pointer"
-                title="Hộp thoại Gemini AI (Ctrl+Shift+A)"
+                title="Hộp thoại trợ lý AI (Ctrl+Shift+A)"
               >
                 <span className="w-2 h-2 bg-indigo-600 rounded-full animate-pulse"></span>
                 <span className="hidden sm:inline-block text-[11px] font-bold uppercase tracking-tight">
-                  Gemini AI
+                  AI
                 </span>
               </button>
 
@@ -1030,7 +1202,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Formatting Toolbar (Only in Edit or Split mode) */}
+        {/* Formatting Toolbar */}
         {viewMode !== 'preview' && (
           <EditorToolbar
             language={settings.language || 'vi'}
@@ -1040,52 +1212,35 @@ export default function App() {
             onSelectAiAction={handleSelectAiAction}
             onUndo={handleUndo}
             onRedo={handleRedo}
-            canUndo={historyIndex > 0}
-            canRedo={historyIndex < historyStack.length - 1}
+            canUndo={editorHistory.canUndo}
+            canRedo={editorHistory.canRedo}
             selectedText={selectedText}
-            activeModel={settings.selectedModel || 'gemini-3.7-flash'}
+            activeModel={activeModel}
             isAiStreaming={isAiStreaming}
             onStopAiStream={handleStopAiStream}
+            onApplyTemplate={handleApplyTemplate}
+            onInsertSnippet={handleInsertSnippet}
           />
         )}
 
-        {/* Center Panes: Editor & Preview & TOC */}
+        {/* Center Panes: Editor & Preview (resizable when split) */}
         <div className="flex-1 flex min-h-0 overflow-hidden relative bg-white">
-          {/* Editor Pane */}
-          {(viewMode === 'split' || viewMode === 'edit') && (
-            <div
-              className={`h-full min-w-0 ${
-                viewMode === 'split' ? 'w-1/2 border-r border-slate-200' : 'w-full'
-              }`}
-            >
-              <MarkdownEditor
-                ref={editorRef}
-                value={currentContent}
-                onChange={handleContentChange}
-                onSelectionChange={handleSelectionChange}
-                fontSize={settings.fontSize}
-                fontFamily={settings.fontFamily}
-                lineNumbers={settings.lineNumbers}
-                wordWrap={settings.wordWrap}
-                placeholder="Bắt đầu soạn thảo Markdown hoặc dùng Gemini AI..."
-                onScroll={handleEditorScroll}
-                onKeyDownShortcut={handleGlobalKeyDown}
-              />
-            </div>
-          )}
-
-          {/* Live Rendered Preview Pane */}
-          {(viewMode === 'split' || viewMode === 'preview') && (
-            <div className={`h-full min-w-0 ${viewMode === 'split' ? 'w-1/2' : 'w-full'} bg-white text-slate-850`}>
-              <MarkdownPreview
-                ref={previewRef}
-                content={currentContent}
-                isDark={false}
-                fontSize={settings.fontSize}
-                fontFamily={settings.fontFamily}
-                onScroll={handlePreviewScroll}
-              />
-            </div>
+          {viewMode === 'split' ? (
+            <PanelGroup direction="horizontal" autoSaveId="mdedit-split-panels" className="flex-1 min-h-0">
+              <Panel defaultSize={50} minSize={25} className="min-w-0">
+                {editorPane}
+              </Panel>
+              <PanelResizeHandle className="w-1.5 bg-slate-100 hover:bg-indigo-300 active:bg-indigo-400 transition-colors cursor-col-resize flex items-center justify-center group">
+                <div className="w-0.5 h-8 rounded-full bg-slate-300 group-hover:bg-indigo-400" />
+              </PanelResizeHandle>
+              <Panel defaultSize={50} minSize={25} className="min-w-0 bg-white">
+                {previewPane}
+              </Panel>
+            </PanelGroup>
+          ) : viewMode === 'edit' ? (
+            <div className="h-full w-full min-w-0">{editorPane}</div>
+          ) : (
+            <div className="h-full w-full min-w-0 bg-white">{previewPane}</div>
           )}
 
           {/* Table of Contents Drawer */}
@@ -1102,7 +1257,8 @@ export default function App() {
             <div className="absolute bottom-5 left-1/2 transform -translate-x-1/2 z-40 flex items-center gap-3 px-4 py-2 rounded-full bg-white border border-indigo-300 shadow-2xl text-slate-800 text-xs animate-in fade-in slide-in-from-bottom-2 pointer-events-auto">
               <Sparkles className="w-4 h-4 text-indigo-600 animate-spin" />
               <span className="font-semibold text-slate-900">
-                Gemini đang viết trực tiếp <span className="text-indigo-600 font-bold">{aiStreamingActionName}</span> vào trình soạn thảo...
+                AI đang viết trực tiếp <span className="text-indigo-600 font-bold">{aiStreamingActionName}</span> vào
+                trình soạn thảo...
               </span>
               <button
                 onClick={handleStopAiStream}
@@ -1133,7 +1289,6 @@ export default function App() {
         {/* Bottom Status Bar */}
         {!isFocusMode && (
           <footer className="h-8 px-4 flex items-center justify-between border-t border-slate-200 bg-slate-50 text-slate-600 text-[10px] sm:text-[11px] select-none font-mono">
-            {/* Left: Document Metrics */}
             <div className="flex items-center gap-3 sm:gap-4 truncate">
               <span>{stats.words} {t.editor.words}</span>
               <span>{stats.characters} {t.editor.characters}</span>
@@ -1141,22 +1296,29 @@ export default function App() {
               <span className="hidden md:inline-block">~{stats.readingTimeMinutes} {t.editor.readingTime}</span>
             </div>
 
-            {/* Right: Position, Key indicator, Shortcuts help */}
             <div className="flex items-center gap-3">
               <span className="hidden sm:inline-block">
                 Dòng {cursorPos.line}, Cột {cursorPos.col}
               </span>
 
-              {/* Gemini Key status badge */}
+              {/* AI provider / key status badge */}
               <button
                 onClick={() => setIsSettingsOpen(true)}
-                className="flex items-center gap-1 px-2 py-0.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 transition-colors text-[10px] cursor-pointer shadow-2xs"
-                title="Trạng thái Gemini API Key (Bấm để cài đặt)"
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-lg border transition-colors text-[10px] cursor-pointer shadow-2xs ${
+                  settings.aiProvider === 'openai'
+                    ? aiKeyState.hasPersonalKey
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-700'
+                    : aiKeyState.serverAvailable && aiKeyState.hasServerKey
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : aiKeyState.hasPersonalKey
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border-amber-200 bg-amber-50 text-amber-700'
+                }`}
+                title="Trạng thái AI & API Key (Bấm để cài đặt)"
               >
-                <Key className="w-3 h-3 text-indigo-600" />
-                <span className={settings.geminiApiKey ? 'text-emerald-700 font-bold' : 'text-amber-600 font-bold'}>
-                  {settings.geminiApiKey ? 'BYOK Đã kết nối' : 'Dùng mặc định'}
-                </span>
+                <Key className="w-3 h-3" />
+                <span className="font-bold">{keyBadgeText()}</span>
               </button>
 
               <button
@@ -1172,7 +1334,6 @@ export default function App() {
       </main>
 
       {/* MODALS */}
-      {/* 1. Gemini AI Assistant */}
       <AiAssistantModal
         isOpen={isAiModalOpen}
         onClose={() => setIsAiModalOpen(false)}
@@ -1191,9 +1352,15 @@ export default function App() {
           }
         }}
         onUndoLastReplacement={handleUndo}
-        canUndo={historyIndex > 0}
-        apiKey={settings.geminiApiKey || ''}
-        defaultModel={settings.selectedModel || 'gemini-3.7-flash'}
+        canUndo={editorHistory.canUndo}
+        provider={settings.aiProvider}
+        defaultModel={activeModel}
+        openaiBaseUrl={settings.openaiBaseUrl}
+        hasApiKey={
+          settings.aiProvider === 'openai'
+            ? aiKeyState.hasPersonalKey
+            : (aiKeyState.serverAvailable && aiKeyState.hasServerKey) || aiKeyState.hasPersonalKey
+        }
         language={settings.language || 'vi'}
         onOpenSettings={() => {
           setIsAiModalOpen(false);
@@ -1201,18 +1368,14 @@ export default function App() {
         }}
       />
 
-      {/* 2. Export Modal (PDF, DOCX, HTML, PNG, XLSX, CSV, MD, TXT) */}
       <ExportModal
         isOpen={isExportModalOpen}
         onClose={() => setIsExportModalOpen(false)}
         documentTitle={currentDoc?.title || 'Tài liệu'}
         documentContent={currentContent}
-        previewElementRef={previewRef}
-        isDark={false}
         language={settings.language || 'vi'}
       />
 
-      {/* 3. Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
@@ -1221,16 +1384,15 @@ export default function App() {
         onDataReset={refreshData}
       />
 
-      {/* 4. Find & Replace */}
       <FindReplaceModal
         isOpen={isFindModalOpen}
         onClose={() => setIsFindModalOpen(false)}
         editorContent={currentContent}
         onReplace={handleContentChange}
+        onNavigateMatch={handleNavigateMatch}
         language={settings.language || 'vi'}
       />
 
-      {/* 5. Table Generator */}
       <TableGeneratorModal
         isOpen={isTableModalOpen}
         onClose={() => setIsTableModalOpen(false)}
@@ -1240,14 +1402,12 @@ export default function App() {
         language={settings.language || 'vi'}
       />
 
-      {/* 6. Shortcuts Cheat Sheet */}
       <ShortcutsModal
         isOpen={isShortcutsOpen}
         onClose={() => setIsShortcutsOpen(false)}
         language={settings.language || 'vi'}
       />
 
-      {/* 7. Onboarding 3-Step Modal */}
       <OnboardingModal
         isOpen={isOnboardingOpen}
         onClose={() => {
@@ -1260,6 +1420,13 @@ export default function App() {
           setIsSettingsOpen(true);
         }}
         language={settings.language || 'vi'}
+      />
+
+      <GoToLineDialog
+        isOpen={isGoToLineOpen}
+        onClose={() => setIsGoToLineOpen(false)}
+        totalLines={stats.lines}
+        onGoToLine={handleGoToLine}
       />
 
       {/* Floating Global Toast Notification */}

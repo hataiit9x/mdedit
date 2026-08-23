@@ -13,12 +13,28 @@ import {
   Eye,
   EyeOff,
   X,
-  Sparkles,
   Sun,
+  Sparkles,
+  ShieldCheck,
+  Globe,
+  Server,
 } from 'lucide-react';
-import { AppSettings, Language } from '../types';
+import { AiProvider, AppSettings, Language } from '../types';
 import { translations } from '../utils/i18n';
-import { testGeminiApiKey, AVAILABLE_MODELS } from '../services/aiService';
+import {
+  testGeminiApiKey,
+  testOpenAiApiKey,
+  checkServerKeyStatus,
+  AVAILABLE_MODELS,
+} from '../services/aiService';
+import {
+  getSecret,
+  setSecret,
+  clearSecret,
+  clearAllSecrets,
+  hasSecret,
+  isCryptoAvailable,
+} from '../services/secureKeyStore';
 import { getStorageEstimate, exportAllDataJson, importDataJson, db } from '../db';
 import { downloadBlob } from '../services/exportService';
 
@@ -37,11 +53,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSaveSettings,
   onDataReset,
 }) => {
-  const [apiKey, setApiKey] = useState(settings.geminiApiKey || '');
-  const [showKey, setShowKey] = useState(false);
+  const [aiProvider, setAiProvider] = useState<AiProvider>(settings.aiProvider || 'gemini');
   const [selectedModel, setSelectedModel] = useState(settings.selectedModel || 'gemini-3.7-flash');
+  const [openaiBaseUrl, setOpenaiBaseUrl] = useState(
+    settings.openaiBaseUrl || 'https://api.openai.com/v1'
+  );
+  const [openaiModel, setOpenaiModel] = useState(settings.openaiModel || 'gpt-4o-mini');
+  const [rememberApiKeys, setRememberApiKeys] = useState(settings.rememberApiKeys ?? false);
+
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
+  const [openaiKeyInput, setOpenaiKeyInput] = useState('');
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [showOpenaiKey, setShowOpenaiKey] = useState(false);
+  const [geminiKeySaved, setGeminiKeySaved] = useState(false);
+  const [openaiKeySaved, setOpenaiKeySaved] = useState(false);
+  const [serverStatus, setServerStatus] = useState<{ available: boolean; hasServerKey: boolean } | null>(null);
+
   const [language, setLanguage] = useState<Language>(settings.language || 'vi');
-  const [theme] = useState<'light'>('light'); // Enforce light theme only
   const [fontSize, setFontSize] = useState(settings.fontSize || 15);
   const [fontFamily, setFontFamily] = useState(settings.fontFamily || 'sans');
   const [lineNumbers, setLineNumbers] = useState(settings.lineNumbers ?? true);
@@ -57,8 +85,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setApiKey(settings.geminiApiKey || '');
+      setAiProvider(settings.aiProvider || 'gemini');
       setSelectedModel(settings.selectedModel || 'gemini-3.7-flash');
+      setOpenaiBaseUrl(settings.openaiBaseUrl || 'https://api.openai.com/v1');
+      setOpenaiModel(settings.openaiModel || 'gpt-4o-mini');
+      setRememberApiKeys(settings.rememberApiKeys ?? false);
       setLanguage(settings.language || 'vi');
       setFontSize(settings.fontSize || 15);
       setFontFamily(settings.fontFamily || 'sans');
@@ -66,7 +97,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setWordWrap(settings.wordWrap ?? true);
       setSyncScroll(settings.syncScroll ?? true);
       setTestResult(null);
+      setGeminiKeyInput('');
+      setOpenaiKeyInput('');
 
+      hasSecret('gemini').then(setGeminiKeySaved);
+      hasSecret('openai').then(setOpenaiKeySaved);
+      checkServerKeyStatus(true).then(setServerStatus);
       getStorageEstimate().then(setStorageStats);
     }
   }, [isOpen, settings]);
@@ -74,15 +110,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   if (!isOpen) return null;
 
   const handleTestKey = async () => {
-    if (!apiKey.trim()) {
-      setTestResult({ success: false, message: 'Vui lòng nhập API key trước khi kiểm tra.' });
-      return;
-    }
     setIsTestingKey(true);
     setTestResult(null);
     try {
-      const res = await testGeminiApiKey(apiKey.trim(), selectedModel);
-      setTestResult(res);
+      if (aiProvider === 'openai') {
+        const key = openaiKeyInput.trim() || (await getSecret('openai'));
+        const res = await testOpenAiApiKey(key, openaiBaseUrl, openaiModel);
+        setTestResult(res);
+      } else {
+        const key = geminiKeyInput.trim() || (await getSecret('gemini'));
+        const res = await testGeminiApiKey(key, selectedModel);
+        setTestResult(res);
+      }
     } catch (e: any) {
       setTestResult({ success: false, message: e.message || 'Kiểm tra kết nối thất bại' });
     } finally {
@@ -90,10 +129,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    // Keys go into the encrypted/session store, never into AppSettings.
+    if (geminiKeyInput.trim()) {
+      await setSecret('gemini', geminiKeyInput, rememberApiKeys);
+    }
+    if (openaiKeyInput.trim()) {
+      await setSecret('openai', openaiKeyInput, rememberApiKeys);
+    }
+
     onSaveSettings({
-      geminiApiKey: apiKey.trim(),
+      aiProvider,
       selectedModel,
+      openaiBaseUrl: openaiBaseUrl.trim(),
+      openaiModel: openaiModel.trim(),
+      rememberApiKeys,
       language,
       theme: 'light',
       fontSize,
@@ -103,6 +153,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       syncScroll,
     });
     onClose();
+  };
+
+  const handleRemoveKey = async (provider: AiProvider) => {
+    await clearSecret(provider);
+    if (provider === 'gemini') {
+      setGeminiKeyInput('');
+      setGeminiKeySaved(false);
+    } else {
+      setOpenaiKeyInput('');
+      setOpenaiKeySaved(false);
+    }
+    setTestResult(null);
   };
 
   const handleExportBackup = async () => {
@@ -136,11 +198,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     if (confirmation === 'DELETE') {
       await db.documents.clear();
       await db.folders.clear();
-      alert('Tất cả tài liệu cục bộ đã được xóa.');
+      await clearAllSecrets();
+      alert('Tất cả tài liệu cục bộ và API key đã được xóa.');
       if (onDataReset) onDataReset();
       onClose();
     }
   };
+
+  const keyInputClass =
+    'w-full text-xs font-mono rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 pr-10 text-slate-900 outline-none focus:border-indigo-500 focus:bg-white transition-colors';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in">
@@ -205,137 +271,346 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Content Area */}
         <div className="p-6 overflow-y-auto flex-1 text-xs space-y-6">
-          {/* TAB 1: GEMINI AI & API KEY */}
+          {/* TAB 1: AI PROVIDERS & API KEYS */}
           {activeTab === 'api' && (
             <div className="space-y-5">
-              {/* API Key */}
+              {/* Provider selection */}
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="font-semibold text-slate-800 flex items-center gap-1.5">
-                    <Key className="w-4 h-4 text-indigo-600" />
-                    <span>{t.apiKeyLabel}</span>
-                  </label>
-                  <a
-                    href="https://aistudio.google.com/app/apikey"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[11px] text-indigo-600 hover:text-indigo-700 underline font-medium flex items-center gap-1"
-                  >
-                    <span>{t.getKeyLink}</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-
-                <div className="flex gap-2">
-                  <div className="relative flex-1">
-                    <input
-                      type={showKey ? 'text' : 'password'}
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder={t.apiKeyPlaceholder}
-                      className="w-full text-xs font-mono rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 pr-10 text-slate-900 outline-none focus:border-indigo-500 focus:bg-white transition-colors"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey(!showKey)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-
+                <label className="font-semibold text-slate-800 flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-indigo-600" />
+                  <span>Nhà cung cấp AI</span>
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <button
-                    onClick={handleTestKey}
-                    disabled={isTestingKey || !apiKey.trim()}
-                    className="px-4 py-2.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold transition-colors disabled:opacity-40 flex items-center gap-1.5 cursor-pointer shadow-xs"
-                  >
-                    {isTestingKey ? (
-                      <div className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                    )}
-                    <span>{isTestingKey ? t.testingKey : t.testKeyBtn}</span>
-                  </button>
-                </div>
-
-                {/* Key test feedback */}
-                {testResult && (
-                  <div
-                    className={`mt-2.5 p-3 rounded-xl border flex items-center gap-2 ${
-                      testResult.success
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                        : 'border-rose-200 bg-rose-50 text-rose-800'
+                    type="button"
+                    onClick={() => setAiProvider('gemini')}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      aiProvider === 'gemini'
+                        ? 'border-indigo-500 bg-indigo-50/80 shadow-xs ring-1 ring-indigo-300'
+                        : 'border-slate-200 bg-white hover:bg-slate-50'
                     }`}
                   >
-                    {testResult.success ? (
-                      <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
-                    )}
-                    <span>{testResult.message}</span>
-                  </div>
-                )}
+                    <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-600" /> Gemini (mặc định)
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-1">
+                      Ưu tiên key server an toàn; fallback key cá nhân (BYOK).
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiProvider('openai')}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      aiProvider === 'openai'
+                        ? 'border-indigo-500 bg-indigo-50/80 shadow-xs ring-1 ring-indigo-300'
+                        : 'border-slate-200 bg-white hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5 text-emerald-600" /> OpenAI-compatible
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-1">
+                      OpenAI, OpenRouter, Groq, DeepSeek, Ollama... (base URL tùy chỉnh).
+                    </div>
+                  </button>
+                </div>
               </div>
 
-              {/* Model selection */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <label className="font-semibold text-slate-800 block">
-                    {t.modelSelection}
-                  </label>
-                  <span className="text-[11px] text-indigo-600 font-mono font-bold">
-                    {selectedModel}
+              {/* Server status (Gemini hybrid) */}
+              {aiProvider === 'gemini' && (
+                <div
+                  className={`p-3 rounded-xl border flex items-center gap-2 ${
+                    serverStatus?.available && serverStatus.hasServerKey
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                      : serverStatus?.available
+                      ? 'border-amber-200 bg-amber-50 text-amber-800'
+                      : 'border-slate-200 bg-slate-50 text-slate-600'
+                  }`}
+                >
+                  <Server className="w-4 h-4 shrink-0" />
+                  <span>
+                    {serverStatus?.available && serverStatus.hasServerKey
+                      ? 'Đang chạy cùng server — key dùng chung nằm an toàn phía server, không cần key cá nhân.'
+                      : serverStatus?.available
+                      ? 'Có server nhưng chưa cấu hình GEMINI_API_KEY phía server — cần key cá nhân bên dưới.'
+                      : 'Không có server — AI sẽ gọi thẳng Google bằng API key cá nhân (BYOK) bên dưới.'}
                   </span>
                 </div>
+              )}
 
-                {/* Custom Model Input */}
-                <div className="space-y-1">
-                  <div className="text-[11px] text-slate-600 font-medium flex items-center justify-between">
-                    <span>{t.customModel}</span>
-                    <span className="text-slate-400 text-[10px]">Đang dùng: {selectedModel}</span>
-                  </div>
-                  <input
-                    type="text"
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value.trim())}
-                    placeholder={t.customModelPlaceholder}
-                    className="w-full text-xs font-mono rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-slate-900 outline-none focus:border-indigo-500 focus:bg-white transition-colors"
-                  />
-                </div>
+              {/* Gemini configuration */}
+              {aiProvider === 'gemini' && (
+                <>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="font-semibold text-slate-800 flex items-center gap-1.5">
+                        <Key className="w-4 h-4 text-indigo-600" />
+                        <span>API Key cá nhân (BYOK — tùy chọn)</span>
+                      </label>
+                      <a
+                        href="https://aistudio.google.com/app/apikey"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] text-indigo-600 hover:text-indigo-700 underline font-medium flex items-center gap-1"
+                      >
+                        <span>{t.getKeyLink}</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
 
-                {/* Preset Models Grid */}
-                <div className="space-y-1.5 pt-1">
-                  <span className="text-[11px] text-slate-500 font-medium block">
-                    {t.presetModels}
-                  </span>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {AVAILABLE_MODELS.map((m) => {
-                      const isSelected = selectedModel === m.id;
-                      return (
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <input
+                          type={showGeminiKey ? 'text' : 'password'}
+                          value={geminiKeyInput}
+                          onChange={(e) => setGeminiKeyInput(e.target.value)}
+                          placeholder={
+                            geminiKeySaved ? '•••••••• (đã lưu — nhập để thay đổi)' : t.apiKeyPlaceholder
+                          }
+                          autoComplete="off"
+                          className={keyInputClass}
+                        />
                         <button
-                          key={m.id}
                           type="button"
-                          onClick={() => setSelectedModel(m.id)}
-                          className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                            isSelected
-                              ? 'border-indigo-500 bg-indigo-50/80 text-indigo-900 shadow-xs ring-1 ring-indigo-300'
-                              : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                          onClick={() => setShowGeminiKey(!showGeminiKey)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                        >
+                          {showGeminiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+
+                      {geminiKeySaved && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveKey('gemini')}
+                          className="px-3 py-2.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold transition-colors cursor-pointer"
+                          title="Xóa key cá nhân đã lưu"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      <button
+                        onClick={handleTestKey}
+                        disabled={isTestingKey || (!geminiKeyInput.trim() && !geminiKeySaved)}
+                        className="px-4 py-2.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold transition-colors disabled:opacity-40 flex items-center gap-1.5 cursor-pointer shadow-xs"
+                      >
+                        {isTestingKey ? (
+                          <div className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isTestingKey ? t.testingKey : t.testKeyBtn}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Model selection */}
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <label className="font-semibold text-slate-800 block">{t.modelSelection}</label>
+                      <span className="text-[11px] text-indigo-600 font-mono font-bold">{selectedModel}</span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-[11px] text-slate-600 font-medium flex items-center justify-between">
+                        <span>{t.customModel}</span>
+                        <span className="text-slate-400 text-[10px]">Đang dùng: {selectedModel}</span>
+                      </div>
+                      <input
+                        type="text"
+                        value={selectedModel}
+                        onChange={(e) => setSelectedModel(e.target.value.trim())}
+                        placeholder={t.customModelPlaceholder}
+                        className="w-full text-xs font-mono rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-slate-900 outline-none focus:border-indigo-500 focus:bg-white transition-colors"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5 pt-1">
+                      <span className="text-[11px] text-slate-500 font-medium block">{t.presetModels}</span>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {AVAILABLE_MODELS.map((m) => {
+                          const isSelected = selectedModel === m.id;
+                          return (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => setSelectedModel(m.id)}
+                              className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                isSelected
+                                  ? 'border-indigo-500 bg-indigo-50/80 text-indigo-900 shadow-xs ring-1 ring-indigo-300'
+                                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <span className="font-semibold text-xs text-slate-900">{m.name}</span>
+                                {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-indigo-600" />}
+                              </div>
+                              <div className="text-[10px] text-slate-400 mt-0.5 font-mono truncate">{m.id}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <p className="text-[11px] text-slate-400 leading-relaxed">{t.modelHint}</p>
+                  </div>
+                </>
+              )}
+
+              {/* OpenAI-compatible configuration */}
+              {aiProvider === 'openai' && (
+                <>
+                  <div className="space-y-2">
+                    <label className="font-semibold text-slate-800 flex items-center gap-1.5">
+                      <Globe className="w-4 h-4 text-emerald-600" />
+                      <span>Base URL (endpoint tương thích OpenAI)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={openaiBaseUrl}
+                      onChange={(e) => setOpenaiBaseUrl(e.target.value)}
+                      placeholder="https://api.openai.com/v1"
+                      className="w-full text-xs font-mono rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-slate-900 outline-none focus:border-emerald-500 focus:bg-white transition-colors"
+                    />
+                    <div className="flex flex-wrap gap-1">
+                      {[
+                        { label: 'OpenAI', url: 'https://api.openai.com/v1' },
+                        { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1' },
+                        { label: 'Groq', url: 'https://api.groq.com/openai/v1' },
+                        { label: 'Ollama (local)', url: 'http://localhost:11434/v1' },
+                      ].map((p) => (
+                        <button
+                          key={p.label}
+                          type="button"
+                          onClick={() => setOpenaiBaseUrl(p.url)}
+                          className={`text-[10px] px-2 py-0.5 rounded-md border transition-all cursor-pointer ${
+                            openaiBaseUrl === p.url
+                              ? 'bg-emerald-600 text-white border-emerald-600 font-bold'
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
                           }`}
                         >
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-xs text-slate-900">{m.name}</span>
-                            {isSelected && (
-                              <CheckCircle2 className="w-3.5 h-3.5 text-indigo-600" />
-                            )}
-                          </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5 font-mono truncate">{m.id}</div>
+                          {p.label}
                         </button>
-                      );
-                    })}
+                      ))}
+                    </div>
                   </div>
-                </div>
 
-                <p className="text-[11px] text-slate-400 leading-relaxed">{t.modelHint}</p>
+                  <div className="space-y-2">
+                    <label className="font-semibold text-slate-800 flex items-center gap-1.5">
+                      <Key className="w-4 h-4 text-emerald-600" />
+                      <span>API Key</span>
+                    </label>
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <input
+                          type={showOpenaiKey ? 'text' : 'password'}
+                          value={openaiKeyInput}
+                          onChange={(e) => setOpenaiKeyInput(e.target.value)}
+                          placeholder={
+                            openaiKeySaved ? '•••••••• (đã lưu — nhập để thay đổi)' : 'sk-...'
+                          }
+                          autoComplete="off"
+                          className={keyInputClass}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowOpenaiKey(!showOpenaiKey)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                        >
+                          {showOpenaiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+
+                      {openaiKeySaved && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveKey('openai')}
+                          className="px-3 py-2.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold transition-colors cursor-pointer"
+                          title="Xóa key đã lưu"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      <button
+                        onClick={handleTestKey}
+                        disabled={isTestingKey || (!openaiKeyInput.trim() && !openaiKeySaved)}
+                        className="px-4 py-2.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-semibold transition-colors disabled:opacity-40 flex items-center gap-1.5 cursor-pointer shadow-xs"
+                      >
+                        {isTestingKey ? (
+                          <div className="w-3.5 h-3.5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isTestingKey ? t.testingKey : t.testKeyBtn}</span>
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Key chỉ được gửi tới đúng endpoint bạn cấu hình (qua HTTPS, trong header). Endpoint cần cho
+                      phép gọi trực tiếp từ trình duyệt (CORS) — các nhà cung cấp lớn đều hỗ trợ.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="font-semibold text-slate-800">Tên model</label>
+                    <input
+                      type="text"
+                      value={openaiModel}
+                      onChange={(e) => setOpenaiModel(e.target.value.trim())}
+                      placeholder="gpt-4o-mini, llama-3.1-70b-versatile, deepseek-chat..."
+                      className="w-full text-xs font-mono rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-slate-900 outline-none focus:border-emerald-500 focus:bg-white transition-colors"
+                    />
+                  </div>
+                </>
+              )}
+
+              {/* Key test feedback */}
+              {testResult && (
+                <div
+                  className={`p-3 rounded-xl border flex items-center gap-2 ${
+                    testResult.success
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                      : 'border-rose-200 bg-rose-50 text-rose-800'
+                  }`}
+                >
+                  {testResult.success ? (
+                    <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                  )}
+                  <span>{testResult.message}</span>
+                </div>
+              )}
+
+              {/* Key storage security */}
+              <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-2">
+                <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-indigo-600" />
+                  <span>Bảo vệ API key</span>
+                </div>
+                <label className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-white border border-slate-200 cursor-pointer">
+                  <span className="font-medium text-slate-800">
+                    Ghi nhớ key trên máy này (mã hóa AES-GCM)
+                    {!isCryptoAvailable() && (
+                      <span className="block text-[10px] text-amber-600 font-normal mt-0.5">
+                        Trình duyệt không hỗ trợ Web Crypto (ngữ cảnh không an toàn) — chỉ lưu được trong phiên.
+                      </span>
+                    )}
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={rememberApiKeys}
+                    disabled={!isCryptoAvailable()}
+                    onChange={(e) => setRememberApiKeys(e.target.checked)}
+                    className="w-4 h-4 rounded accent-indigo-600 cursor-pointer shrink-0"
+                  />
+                </label>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {rememberApiKeys
+                    ? 'Key được mã hoá bằng khoá không-thể-xuất (non-extractable) lưu trong IndexedDB — kể cả khi đọc trực tiếp file cơ sở dữ liệu cũng chỉ thấy mật mã.'
+                    : 'Mặc định: key chỉ nằm trong bộ nhớ của phiên làm việc, đóng tab là biến mất — an toàn nhất khi dùng máy chung.'}
+                </p>
               </div>
             </div>
           )}
@@ -344,11 +619,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === 'editor' && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* Language */}
                 <div>
-                  <label className="font-semibold text-slate-800 block mb-1">
-                    {t.language}
-                  </label>
+                  <label className="font-semibold text-slate-800 block mb-1">{t.language}</label>
                   <select
                     value={language}
                     onChange={(e) => setLanguage(e.target.value as Language)}
@@ -359,11 +631,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </select>
                 </div>
 
-                {/* Theme (Locked to Light Mode) */}
                 <div>
-                  <label className="font-semibold text-slate-800 block mb-1">
-                    Giao diện (Chế độ duy nhất)
-                  </label>
+                  <label className="font-semibold text-slate-800 block mb-1">Giao diện (Chế độ duy nhất)</label>
                   <div className="flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-700 font-semibold">
                     <Sun className="w-4 h-4 text-amber-500" />
                     <span>Chế độ sáng (Light Mode duy nhất)</span>
@@ -372,11 +641,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* Font Family */}
                 <div>
-                  <label className="font-semibold text-slate-800 block mb-1">
-                    {t.fontFamily}
-                  </label>
+                  <label className="font-semibold text-slate-800 block mb-1">{t.fontFamily}</label>
                   <select
                     value={fontFamily}
                     onChange={(e) => setFontFamily(e.target.value as any)}
@@ -388,7 +654,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </select>
                 </div>
 
-                {/* Font Size */}
                 <div>
                   <label className="font-semibold text-slate-800 block mb-1">
                     {t.fontSize}: <span className="font-mono text-indigo-600 font-bold">{fontSize}px</span>
@@ -405,7 +670,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
 
-              {/* Toggles */}
               <div className="space-y-2.5 pt-2 border-t border-slate-100">
                 <label className="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
                   <span className="font-medium text-slate-800">{t.lineNumbers}</span>
@@ -464,7 +728,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
 
-              {/* Export & Import actions */}
               <div className="space-y-2">
                 <div className="font-semibold text-slate-800">{t.backupSection}</div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -484,9 +747,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <span>{t.importJson}</span>
                   </button>
                 </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Bản sao lưu chứa tài liệu & cài đặt, nhưng <strong>không bao giờ</strong> chứa API key.
+                </p>
               </div>
 
-              {/* Danger Zone */}
               <div className="pt-3 border-t border-slate-200">
                 <div className="font-semibold text-rose-600 mb-2">{t.dangerZone}</div>
                 <button

@@ -19,7 +19,7 @@ import {
   ArrowRight,
   SlidersHorizontal,
 } from 'lucide-react';
-import { AiActionType, Language, TranslationTargetLanguage } from '../types';
+import { AiActionType, AiProvider, Language, TranslationTargetLanguage } from '../types';
 import { translations } from '../utils/i18n';
 import { executeAiAction, AVAILABLE_MODELS } from '../services/aiService';
 
@@ -31,8 +31,10 @@ interface AiAssistantModalProps {
   onApplyReplacement: (newText: string, mode: 'replace' | 'insertBelow') => void;
   onUndoLastReplacement?: () => void;
   canUndo?: boolean;
-  apiKey: string;
+  provider: AiProvider;
   defaultModel: string;
+  openaiBaseUrl?: string;
+  hasApiKey?: boolean;
   language: Language;
   onOpenSettings: () => void;
 }
@@ -45,8 +47,10 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   onApplyReplacement,
   onUndoLastReplacement,
   canUndo = false,
-  apiKey,
+  provider,
   defaultModel,
+  openaiBaseUrl,
+  hasApiKey = false,
   language,
   onOpenSettings,
 }) => {
@@ -74,6 +78,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     { id: 'outline', icon: ListOrdered, label: t.actions.outline, desc: t.actionDescriptions.outline },
     { id: 'continue', icon: FastForward, label: t.actions.continue, desc: t.actionDescriptions.continue },
     { id: 'simplify', icon: HelpCircle, label: t.actions.simplify, desc: t.actionDescriptions.simplify },
+    { id: 'custom', icon: SlidersHorizontal, label: 'Tùy chỉnh', desc: 'Làm theo yêu cầu riêng của bạn' },
   ];
 
   const handleGenerate = async () => {
@@ -86,7 +91,8 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         targetLanguage,
         customPrompt: customPrompt.trim() ? customPrompt : undefined,
         model,
-        apiKey,
+        provider,
+        baseUrl: provider === 'openai' ? openaiBaseUrl : undefined,
       });
       setResultText(output);
     } catch (err: any) {
@@ -130,11 +136,15 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         </div>
 
         {/* API Key Missing Warning Banner */}
-        {!apiKey && (
+        {!hasApiKey && (
           <div className="px-6 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between text-xs text-amber-900">
             <div className="flex items-center gap-2 font-medium">
               <Key className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>Chưa cấu hình Gemini API Key. Bạn có thể thêm khóa để sử dụng không giới hạn.</span>
+              <span>
+                {provider === 'openai'
+                  ? 'Chưa cấu hình API Key cho nhà cung cấp OpenAI-compatible.'
+                  : 'Chưa cấu hình API Key cá nhân (BYOK).'}
+              </span>
             </div>
             <button
               onClick={() => {
@@ -209,7 +219,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
             <div className="space-y-1">
               <div className="flex items-center justify-between">
                 <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-                  Mô hình AI (Tự điền model)
+                  Mô hình AI
                 </label>
                 <button
                   type="button"
@@ -224,37 +234,50 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                   type="text"
                   value={model}
                   onChange={(e) => setModel(e.target.value.trim())}
-                  placeholder="gemini-3.7-flash, gemini-3.6-flash..."
+                  placeholder={provider === 'openai' ? 'gpt-4o-mini, llama3, deepseek-chat...' : 'gemini-3.7-flash, gemini-3.6-flash...'}
                   className="w-full text-xs font-mono rounded-xl border border-slate-200 bg-white px-3 py-2 text-slate-900 outline-none focus:border-indigo-500 shadow-xs"
                 />
               </div>
-              <div className="flex flex-wrap gap-1 pt-1">
-                {AVAILABLE_MODELS.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => setModel(m.id)}
-                    className={`text-[10px] px-2 py-0.5 rounded-md font-mono border transition-all cursor-pointer ${
-                      model === m.id
-                        ? 'bg-indigo-600 text-white border-indigo-600 font-bold'
-                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    {m.id.replace('gemini-', '')}
-                  </button>
-                ))}
-              </div>
+              {provider === 'gemini' && (
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {AVAILABLE_MODELS.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setModel(m.id)}
+                      className={`text-[10px] px-2 py-0.5 rounded-md font-mono border transition-all cursor-pointer ${
+                        model === m.id
+                          ? 'bg-indigo-600 text-white border-indigo-600 font-bold'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      {m.id.replace('gemini-', '')}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {provider === 'openai' && openaiBaseUrl && (
+                <div className="text-[10px] text-slate-400 font-mono truncate pt-0.5" title={openaiBaseUrl}>
+                  Endpoint: {openaiBaseUrl}
+                </div>
+              )}
             </div>
 
             {/* Custom Instruction Prompt */}
             <div className="space-y-1">
               <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-                Yêu cầu bổ sung (Tùy chọn)
+                {selectedAction === 'custom'
+                  ? 'Yêu cầu tùy chỉnh (bắt buộc)'
+                  : 'Yêu cầu bổ sung (Tùy chọn)'}
               </label>
               <textarea
                 value={customPrompt}
                 onChange={(e) => setCustomPrompt(e.target.value)}
-                placeholder="Ví dụ: Dùng văn phong trang trọng, thêm emoji, liệt kê 5 gạch đầu dòng..."
+                placeholder={
+                  selectedAction === 'custom'
+                    ? 'Ví dụ: Viết lại thành đoạn mở đầu cho bài blog công nghệ, giọng văn trẻ trung...'
+                    : 'Ví dụ: Dùng văn phong trang trọng, thêm emoji, liệt kê 5 gạch đầu dòng...'
+                }
                 rows={2}
                 className="w-full text-xs rounded-xl border border-slate-200 bg-white p-3 text-slate-900 placeholder-slate-400 outline-none focus:border-indigo-500 shadow-xs resize-none"
               />
@@ -263,13 +286,13 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
             {/* Generate Action Button */}
             <button
               onClick={handleGenerate}
-              disabled={isLoading || !targetText.trim()}
+              disabled={isLoading || !targetText.trim() || (selectedAction === 'custom' && !customPrompt.trim())}
               className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-md shadow-indigo-600/20 disabled:opacity-40 transition-all cursor-pointer"
             >
               {isLoading ? (
                 <>
                   <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  <span>Đang xử lý với Gemini...</span>
+                  <span>Đang xử lý...</span>
                 </>
               ) : (
                 <>

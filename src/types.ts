@@ -31,9 +31,14 @@ export interface TrashItem extends DocumentItem {
   deletedAt: number;
 }
 
+export type AiProvider = 'gemini' | 'openai';
+
 export interface AppSettings {
-  geminiApiKey: string;
   selectedModel: string;
+  aiProvider: AiProvider;
+  openaiBaseUrl: string;
+  openaiModel: string;
+  rememberApiKeys: boolean;
   language: Language;
   theme: Theme;
   fontSize: number; // e.g. 15, 16, 18

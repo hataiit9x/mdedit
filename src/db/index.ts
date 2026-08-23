@@ -19,8 +19,11 @@ export class MDEditDB extends Dexie {
 export const db = new MDEditDB();
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  geminiApiKey: '',
   selectedModel: 'gemini-3.7-flash',
+  aiProvider: 'gemini',
+  openaiBaseUrl: 'https://api.openai.com/v1',
+  openaiModel: 'gpt-4o-mini',
+  rememberApiKeys: false,
   language: 'vi',
   theme: 'light',
   fontSize: 15,
@@ -365,10 +368,9 @@ export async function exportAllDataJson(): Promise<string> {
     exportedAt: new Date().toISOString(),
     documents: docs,
     folders: folders,
-    settings: {
-      ...settings,
-      geminiApiKey: '', // For security, do not export raw API key
-    },
+    // API keys never leave the device: they live in a separate encrypted
+    // store and are intentionally excluded from backups.
+    settings,
   };
 
   return JSON.stringify(backup, null, 2);

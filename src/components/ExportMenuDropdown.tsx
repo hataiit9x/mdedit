@@ -123,7 +123,7 @@ export const ExportMenuDropdown: React.FC<ExportMenuDropdownProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-900">{isVi ? 'Tài liệu PDF' : 'PDF Document'}</span>
-                <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-rose-50 text-rose-700">.pdf</span>
+                <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-rose-50 text-rose-700">.pdf</span>
               </div>
               <div className="text-[10px] text-slate-400 truncate">
                 {isVi ? 'Trang in chuẩn, giữ font & định dạng' : 'Print-ready layout with custom styling'}
@@ -143,7 +143,7 @@ export const ExportMenuDropdown: React.FC<ExportMenuDropdownProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-900">{isVi ? 'Microsoft Word' : 'Microsoft Word'}</span>
-                <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-blue-50 text-blue-700">.docx</span>
+                <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">.docx</span>
               </div>
               <div className="text-[10px] text-slate-400 truncate">
                 {isVi ? 'Tài liệu Word có cấu trúc tiêu đề & bảng' : 'Editable Word doc with headings and tables'}
@@ -163,7 +163,7 @@ export const ExportMenuDropdown: React.FC<ExportMenuDropdownProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-900">{isVi ? 'Mã nguồn Markdown' : 'Markdown Source'}</span>
-                <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700">.md</span>
+                <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">.md</span>
               </div>
               <div className="text-[10px] text-slate-400 truncate">
                 {isVi ? 'Tệp văn bản thuần định dạng Markdown gốc' : 'Standard raw markdown text file'}
@@ -183,7 +183,7 @@ export const ExportMenuDropdown: React.FC<ExportMenuDropdownProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-900">{isVi ? 'Trang web HTML' : 'Standalone HTML'}</span>
-                <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700">.html</span>
+                <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">.html</span>
               </div>
               <div className="text-[10px] text-slate-400 truncate">
                 {isVi ? 'Trang web độc lập có KaTeX & CSS' : 'Standalone page with embedded math & styles'}
@@ -203,7 +203,7 @@ export const ExportMenuDropdown: React.FC<ExportMenuDropdownProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-900">{isVi ? 'Ảnh chụp xem trước' : 'PNG Image'}</span>
-                <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-violet-50 text-violet-700">.png</span>
+                <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-violet-50 text-violet-700">.png</span>
               </div>
               <div className="text-[10px] text-slate-400 truncate">
                 {isVi ? 'Chụp ảnh độ phân giải cao' : 'High resolution preview snapshot'}
@@ -228,7 +228,7 @@ export const ExportMenuDropdown: React.FC<ExportMenuDropdownProps> = ({
             </div>
             <div className="flex-1 min-w-0 flex items-center justify-between">
               <span className="font-medium text-slate-800">{isVi ? 'Xuất bảng sang Excel' : 'Export Tables to Excel'}</span>
-              <span className="text-[9px] font-mono font-bold px-1 py-0.2 rounded bg-teal-50 text-teal-700">.xlsx</span>
+              <span className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-teal-50 text-teal-700">.xlsx</span>
             </div>
           </button>
 
@@ -243,7 +243,7 @@ export const ExportMenuDropdown: React.FC<ExportMenuDropdownProps> = ({
             </div>
             <div className="flex-1 min-w-0 flex items-center justify-between">
               <span className="font-medium text-slate-800">{isVi ? 'Xuất bảng sang CSV' : 'Export Tables to CSV'}</span>
-              <span className="text-[9px] font-mono font-bold px-1 py-0.2 rounded bg-cyan-50 text-cyan-700">.csv</span>
+              <span className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-cyan-50 text-cyan-700">.csv</span>
             </div>
           </button>
 
@@ -258,7 +258,7 @@ export const ExportMenuDropdown: React.FC<ExportMenuDropdownProps> = ({
             </div>
             <div className="flex-1 min-w-0 flex items-center justify-between">
               <span className="font-medium text-slate-800">{isVi ? 'Văn bản thuần' : 'Plain Text'}</span>
-              <span className="text-[9px] font-mono font-bold px-1 py-0.2 rounded bg-amber-50 text-amber-700">.txt</span>
+              <span className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-amber-50 text-amber-700">.txt</span>
             </div>
           </button>
 

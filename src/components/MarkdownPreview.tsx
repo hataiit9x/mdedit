@@ -4,10 +4,13 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
+import rehypeSlug from 'rehype-slug';
 import { Copy, Check, FileSpreadsheet, Download } from 'lucide-react';
 import MermaidDiagram from './MermaidDiagram';
 import * as XLSX from 'xlsx';
 import { downloadBlob } from '../services/exportService';
+import 'katex/dist/katex.min.css';
+import 'highlight.js/styles/github.css';
 
 interface MarkdownPreviewProps {
   content: string;
@@ -17,8 +20,22 @@ interface MarkdownPreviewProps {
   onScroll?: (e: React.UIEvent<HTMLDivElement>) => void;
 }
 
+// react-markdown v10 removed the `inline` prop on `code`: an inline span is
+// simply one without a `language-*` className (rehype-highlight adds the
+// class to fenced blocks only). Extracting copy-text from the hast `node`
+// also survives syntax highlighting (children are React elements, so
+// String(children) used to produce "[object Object]").
+function hastText(node: any): string {
+  if (!node) return '';
+  if (node.type === 'text') return typeof node.value === 'string' ? node.value : '';
+  if (Array.isArray(node.children)) return node.children.map(hastText).join('');
+  return '';
+}
+
+const SAFE_HREF = /^(https?:|mailto:|tel:|#|\/)/i;
+
 export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
-  ({ content, isDark = false, fontSize = 15, fontFamily = 'sans', onScroll }, ref) => {
+  ({ content, fontSize = 15, fontFamily = 'sans', onScroll }, ref) => {
     const fontClass =
       fontFamily === 'serif'
         ? 'font-serif'
@@ -37,57 +54,31 @@ export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
         <div className="max-w-4xl mx-auto space-y-4">
           <Markdown
             remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex, rehypeHighlight]}
+            rehypePlugins={[rehypeKatex, rehypeHighlight, rehypeSlug]}
             components={{
-              // Headings with auto IDs for Table of Contents jump
-              h1: ({ children, ...props }) => {
-                const text = String(children);
-                const id = text
-                  .toLowerCase()
-                  .replace(/[^\w\s-]/g, '')
-                  .replace(/\s+/g, '-');
-                return (
-                  <h1
-                    id={id}
-                    className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 pt-6 pb-2 border-b border-slate-200 scroll-mt-6"
-                    {...props}
-                  >
-                    {children}
-                  </h1>
-                );
-              },
-              h2: ({ children, ...props }) => {
-                const text = String(children);
-                const id = text
-                  .toLowerCase()
-                  .replace(/[^\w\s-]/g, '')
-                  .replace(/\s+/g, '-');
-                return (
-                  <h2
-                    id={id}
-                    className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 pt-5 pb-1.5 border-b border-slate-200 scroll-mt-6"
-                    {...props}
-                  >
-                    {children}
-                  </h2>
-                );
-              },
-              h3: ({ children, ...props }) => {
-                const text = String(children);
-                const id = text
-                  .toLowerCase()
-                  .replace(/[^\w\s-]/g, '')
-                  .replace(/\s+/g, '-');
-                return (
-                  <h3
-                    id={id}
-                    className="text-lg sm:text-xl font-bold text-slate-850 pt-4 pb-1 scroll-mt-6"
-                    {...props}
-                  >
-                    {children}
-                  </h3>
-                );
-              },
+              // Heading ids come from rehype-slug (github-slugger), matching
+              // extractToc() in utils/markdownUtils.ts so TOC jumps land right.
+              h1: ({ children, ...props }) => (
+                <h1
+                  className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 pt-6 pb-2 border-b border-slate-200 scroll-mt-6"
+                  {...props}
+                >
+                  {children}
+                </h1>
+              ),
+              h2: ({ children, ...props }) => (
+                <h2
+                  className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 pt-5 pb-1.5 border-b border-slate-200 scroll-mt-6"
+                  {...props}
+                >
+                  {children}
+                </h2>
+              ),
+              h3: ({ children, ...props }) => (
+                <h3 className="text-lg sm:text-xl font-bold text-slate-900 pt-4 pb-1 scroll-mt-6" {...props}>
+                  {children}
+                </h3>
+              ),
               h4: ({ children, ...props }) => (
                 <h4 className="text-base font-bold text-slate-800 pt-3" {...props}>
                   {children}
@@ -121,32 +112,35 @@ export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
                   {children}
                 </blockquote>
               ),
-              hr: ({ ...props }) => (
-                <hr className="my-8 border-t border-slate-200" {...props} />
-              ),
-              a: ({ children, href, ...props }) => (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-indigo-600 font-medium underline underline-offset-4 decoration-indigo-300 hover:text-indigo-800 transition-colors"
-                  {...props}
-                >
-                  {children}
-                </a>
-              ),
-              // Code rendering (Mermaid vs syntax highlight)
-              code: ({ inline, className, children, ...props }: any) => {
-                const match = /language-(\w+)/.exec(className || '');
-                const language = match ? match[1] : '';
-                const codeString = String(children).replace(/\n$/, '');
+              hr: ({ ...props }) => <hr className="my-8 border-t border-slate-200" {...props} />,
+              a: ({ children, href, ...props }) => {
+                // Only allow well-known schemes — blocks javascript: and
+                // other exotic URLs injected through markdown links.
+                const safeHref = typeof href === 'string' && SAFE_HREF.test(href.trim()) ? href : undefined;
+                return (
+                  <a
+                    href={safeHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-indigo-600 font-medium underline underline-offset-4 decoration-indigo-300 hover:text-indigo-800 transition-colors"
+                    {...(safeHref ? props : {})}
+                  >
+                    {children}
+                  </a>
+                );
+              },
+              code: ({ className, children, node, ...props }: any) => {
+                const isInline = !className;
+                const languageMatch = /language-(\w+)/.exec(className || '');
+                const language = languageMatch ? languageMatch[1] : '';
+                const codeString = hastText(node).replace(/\n$/, '');
 
-                if (!inline && language === 'mermaid') {
+                if (!isInline && language === 'mermaid') {
                   return <MermaidDiagram code={codeString} isDark={false} />;
                 }
 
-                if (!inline) {
-                  return <CodeBlock language={language} code={codeString} {...props} />;
+                if (!isInline) {
+                  return <CodeBlock language={language} code={codeString}>{children}</CodeBlock>;
                 }
 
                 return (
@@ -158,7 +152,6 @@ export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
                   </code>
                 );
               },
-              // Enhanced Tables with quick export button
               table: ({ children, ...props }) => {
                 return <EnhancedTable {...props}>{children}</EnhancedTable>;
               },
@@ -171,10 +164,7 @@ export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
                 </th>
               ),
               td: ({ children, ...props }) => (
-                <td
-                  className="border border-slate-200 px-4 py-2 text-slate-750 bg-white"
-                  {...props}
-                >
+                <td className="border border-slate-200 px-4 py-2 text-slate-700 bg-white" {...props}>
                   {children}
                 </td>
               ),
@@ -199,7 +189,15 @@ export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
 
 MarkdownPreview.displayName = 'MarkdownPreview';
 
-function CodeBlock({ language, code }: { language: string; code: string }) {
+function CodeBlock({
+  language,
+  code,
+  children,
+}: {
+  language: string;
+  code: string;
+  children: React.ReactNode;
+}) {
   const [copied, setCopied] = useState(false);
 
   const copyCode = () => {
@@ -209,21 +207,22 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   };
 
   return (
-    <div className="relative group my-5 rounded-xl border border-slate-800 bg-[#18181b] text-slate-100 overflow-hidden shadow-md">
-      <div className="flex items-center justify-between px-4 py-2 bg-zinc-900 border-b border-zinc-800 text-xs text-zinc-400 font-mono">
-        <span className="uppercase tracking-wider text-[11px] font-semibold text-zinc-300">
+    <div className="relative group my-5 rounded-xl border border-slate-200 bg-[#f8fafc] overflow-hidden shadow-sm">
+      <div className="flex items-center justify-between px-4 py-1.5 bg-slate-100 border-b border-slate-200 text-xs text-slate-500 font-mono">
+        <span className="uppercase tracking-wider text-[11px] font-semibold text-slate-600">
           {language || 'code'}
         </span>
         <button
           onClick={copyCode}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors cursor-pointer text-xs"
+          className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white hover:bg-slate-200 text-slate-600 transition-colors cursor-pointer text-xs border border-slate-200"
         >
-          {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+          {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
           <span>{copied ? 'Đã sao chép' : 'Sao chép'}</span>
         </button>
       </div>
-      <div className="overflow-x-auto p-4 font-mono text-sm leading-relaxed">
-        <code>{code}</code>
+      {/* `children` keeps the rehype-highlight spans so syntax colors render */}
+      <div className="overflow-x-auto p-4 font-mono text-sm leading-relaxed text-slate-800">
+        <code>{children}</code>
       </div>
     </div>
   );

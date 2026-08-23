@@ -43,11 +43,58 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const lineNumbersRef = useRef<HTMLDivElement>(null);
     const [linesCount, setLinesCount] = useState(1);
+    const [currentLine, setCurrentLine] = useState(1);
 
     useEffect(() => {
       const lines = (value || '').split('\n').length;
       setLinesCount(Math.max(1, lines));
     }, [value]);
+
+    const lineHeight = fontSize * 1.6;
+
+    const syncCurrentLine = () => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      const upToCursor = value.substring(0, textarea.selectionStart);
+      setCurrentLine(upToCursor.split('\n').length);
+    };
+
+    // Insert an image (from paste or drag&drop) as a base64 data-URL markdown node
+    const insertImageFile = (file: File) => {
+      const textarea = textareaRef.current;
+      if (!file.type.startsWith('image/')) return;
+      if (file.size > 5 * 1024 * 1024) {
+        console.warn('Image too large to embed (>5MB):', file.name);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result || '');
+        const safeName = (file.name || 'image').replace(/[()[\]]/g, '_');
+        const start = textarea ? textarea.selectionStart : value.length;
+        const markdownImage = `\n![${safeName}](${dataUrl})\n`;
+        onChange(value.substring(0, start) + markdownImage + value.substring(start));
+      };
+      reader.readAsDataURL(file);
+    };
+
+    const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const files = Array.from(e.clipboardData?.files || []);
+      const image = files.find((f) => f.type.startsWith('image/'));
+      if (image) {
+        e.preventDefault();
+        insertImageFile(image);
+      }
+    };
+
+    const handleDrop = (e: React.DragEvent<HTMLTextAreaElement>) => {
+      const files = Array.from(e.dataTransfer?.files || []);
+      const image = files.find((f) => f.type.startsWith('image/'));
+      if (image) {
+        e.preventDefault();
+        insertImageFile(image);
+      }
+    };
 
     useImperativeHandle(ref, () => ({
       insertText: (textToInsert: string, cursorOffset = textToInsert.length) => {
@@ -138,6 +185,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
       if (!textarea || !onSelectionChange) return;
       const selected = value.substring(textarea.selectionStart, textarea.selectionEnd);
       onSelectionChange(selected, textarea.selectionStart, textarea.selectionEnd);
+      syncCurrentLine();
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -237,33 +285,59 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
             }}
           >
             {Array.from({ length: linesCount }, (_, i) => (
-              <div key={i + 1} className="leading-relaxed opacity-80 font-medium">
+              <div
+                key={i + 1}
+                className={`leading-relaxed font-medium ${
+                  wordWrap ? 'opacity-80' : i + 1 === currentLine ? 'opacity-100 text-indigo-500 font-bold' : 'opacity-80'
+                }`}
+              >
                 {i + 1}
               </div>
             ))}
           </div>
         )}
 
-        <textarea
-          ref={textareaRef}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onSelect={handleSelect}
-          onKeyUp={handleSelect}
-          onClick={handleSelect}
-          onKeyDown={handleKeyDown}
-          onScroll={handleScrollInternal}
-          placeholder={placeholder || 'Bắt đầu soạn thảo Markdown...'}
-          spellCheck={false}
-          className={`flex-1 h-full w-full resize-none p-6 outline-none bg-white leading-relaxed text-slate-900 ${fontClass} ${
-            wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre overflow-x-auto'
-          } placeholder-slate-400 selection:bg-indigo-100 selection:text-indigo-900`}
-          style={{
-            fontSize: `${fontSize}px`,
-            lineHeight: 1.6,
-            tabSize: 2,
-          }}
-        />
+        <div className="relative flex-1 min-w-0 h-full">
+          {/* Current-line highlight — only accurate without soft wrap, where
+              one logical line occupies exactly one visual row. */}
+          {!wordWrap && (
+            <div
+              aria-hidden="true"
+              className="absolute left-0 right-0 pointer-events-none bg-indigo-50/60"
+              style={{
+                top: `${24 + (currentLine - 1) * lineHeight}px`,
+                height: `${lineHeight}px`,
+              }}
+            />
+          )}
+
+          <textarea
+            ref={textareaRef}
+            value={value}
+            onChange={(e) => {
+              onChange(e.target.value);
+              syncCurrentLine();
+            }}
+            onSelect={handleSelect}
+            onKeyUp={handleSelect}
+            onClick={handleSelect}
+            onKeyDown={handleKeyDown}
+            onScroll={handleScrollInternal}
+            onPaste={handlePaste}
+            onDrop={handleDrop}
+            onDragOver={(e) => e.preventDefault()}
+            placeholder={placeholder || 'Bắt đầu soạn thảo Markdown...'}
+            spellCheck={false}
+            className={`relative z-10 h-full w-full resize-none p-6 outline-none bg-transparent leading-relaxed text-slate-900 ${fontClass} ${
+              wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre overflow-x-auto'
+            } placeholder-slate-400 selection:bg-indigo-100 selection:text-indigo-900`}
+            style={{
+              fontSize: `${fontSize}px`,
+              lineHeight: 1.6,
+              tabSize: 2,
+            }}
+          />
+        </div>
       </div>
     );
   }

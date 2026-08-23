@@ -7,7 +7,7 @@ interface FindReplaceModalProps {
   onClose: () => void;
   editorContent: string;
   onReplace: (newContent: string) => void;
-  onHighlightMatch?: (index: number) => void;
+  onNavigateMatch?: (start: number, end: number) => void;
   language: Language;
 }
 
@@ -16,6 +16,7 @@ export const FindReplaceModal: React.FC<FindReplaceModalProps> = ({
   onClose,
   editorContent,
   onReplace,
+  onNavigateMatch,
   language,
 }) => {
   const [findQuery, setFindQuery] = useState('');
@@ -44,6 +45,14 @@ export const FindReplaceModal: React.FC<FindReplaceModalProps> = ({
     setMatchIndices(indices);
     setCurrentIndex(0);
   }, [findQuery, matchCase, editorContent]);
+
+  // Reveal the active match in the editor whenever it changes.
+  useEffect(() => {
+    if (!onNavigateMatch || matchIndices.length === 0) return;
+    const start = matchIndices[currentIndex];
+    if (start === undefined) return;
+    onNavigateMatch(start, start + findQuery.length);
+  }, [currentIndex, matchIndices, findQuery, onNavigateMatch]);
 
   if (!isOpen) return null;
 
@@ -76,6 +85,17 @@ export const FindReplaceModal: React.FC<FindReplaceModalProps> = ({
     onReplace(newContent);
   };
 
+  const handleFindKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey) handlePrev();
+      else handleNext();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
   return (
     <div className="fixed top-14 right-8 z-40 w-80 sm:w-96 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-2xl text-slate-800 animate-in fade-in slide-in-from-top-2">
       {/* Header */}
@@ -101,6 +121,7 @@ export const FindReplaceModal: React.FC<FindReplaceModalProps> = ({
             autoFocus
             value={findQuery}
             onChange={(e) => setFindQuery(e.target.value)}
+            onKeyDown={handleFindKeyDown}
             placeholder="Tìm kiếm từ khóa..."
             className="w-full bg-transparent outline-none text-slate-900 placeholder-slate-400 text-xs"
           />
@@ -152,6 +173,7 @@ export const FindReplaceModal: React.FC<FindReplaceModalProps> = ({
             type="text"
             value={replaceQuery}
             onChange={(e) => setReplaceQuery(e.target.value)}
+            onKeyDown={handleFindKeyDown}
             placeholder="Thay thế bằng..."
             className="w-full bg-transparent outline-none text-slate-900 placeholder-slate-400 text-xs"
           />
