@@ -1,11 +1,10 @@
 // Multi-provider AI service — no backend required.
 //
 // Provider "gemini" (hybrid):
-//   - If the app is served by server.ts (AI Studio deploy / `npm run dev`),
-//     requests go through /api/gemini/* so a shared server-side key can be
-//     used and never reaches the browser.
-//   - Otherwise the browser calls Google's REST API directly with the user's
-//     personal key (BYOK), sent only via the `x-goog-api-key` header.
+//   - A personal key always calls Google directly from the browser, so BYOK
+//     credentials never pass through the MDEdit server.
+//   - Without a personal key, a deployment may proxy requests using its own
+//     shared GEMINI_API_KEY, which never reaches the browser.
 //
 // Provider "openai": any OpenAI-compatible endpoint (OpenAI, OpenRouter,
 // Groq, DeepSeek, Ollama, ...) configured in Settings, called directly with
@@ -299,14 +298,12 @@ function requireText(text: string): Error | null {
 /* Gemini: server-proxy branch                                         */
 /* ------------------------------------------------------------------ */
 
-async function geminiServerGenerate(params: ExecuteAiActionParams, apiKey: string): Promise<string> {
+async function geminiServerGenerate(params: ExecuteAiActionParams): Promise<string> {
   const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['x-gemini-api-key'] = apiKey;
 
   const res = await fetch('/api/gemini/action', {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, systemInstruction, model: params.model }),
   });
 
@@ -319,16 +316,13 @@ async function geminiServerGenerate(params: ExecuteAiActionParams, apiKey: strin
 
 async function geminiServerStream(
   params: ExecuteAiActionParams,
-  apiKey: string,
   hooks: StreamHooks
 ): Promise<string> {
   const { systemInstruction, prompt } = buildInstructionAndPrompt(params);
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['x-gemini-api-key'] = apiKey;
 
   const response = await fetch('/api/gemini/action-stream', {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, systemInstruction, model: params.model }),
     signal: hooks.signal,
   });
@@ -690,17 +684,17 @@ export async function executeAiAction(params: ExecuteAiActionParams): Promise<st
     return openaiServerGenerate(params, route.server);
   }
 
-  // Gemini: prefer the server proxy when one is present (shared key stays server-side)
+  // A personal BYOK key always calls Google directly. The MDEdit proxy is
+  // reserved for a deployment-owned shared key.
   const server = await checkServerKeyStatus();
   const apiKey = await getSecret('gemini');
-  if (server.available) {
-    return geminiServerGenerate(params, apiKey);
+  if (apiKey) {
+    return geminiDirectGenerate(params, apiKey);
   }
-
-  if (!apiKey) {
-    throw new Error(NO_KEY_ERROR);
+  if (server.available && server.hasServerKey) {
+    return geminiServerGenerate(params);
   }
-  return geminiDirectGenerate(params, apiKey);
+  throw new Error(NO_KEY_ERROR);
 }
 
 export interface ExecuteAiActionStreamParams extends ExecuteAiActionParams {
@@ -733,14 +727,13 @@ export async function executeAiActionStream(params: ExecuteAiActionStreamParams)
 
     const server = await checkServerKeyStatus();
     const apiKey = await getSecret('gemini');
-    if (server.available) {
-      return await geminiServerStream(rest, apiKey, hooks);
+    if (apiKey) {
+      return await geminiDirectStream(rest, apiKey, hooks);
     }
-
-    if (!apiKey) {
-      throw new Error(NO_KEY_ERROR);
+    if (server.available && server.hasServerKey) {
+      return await geminiServerStream(rest, hooks);
     }
-    return await geminiDirectStream(rest, apiKey, hooks);
+    throw new Error(NO_KEY_ERROR);
   } catch (err: any) {
     if (signal?.aborted) {
       return '';
@@ -761,11 +754,11 @@ export async function testGeminiApiKey(
   const key = apiKey.trim();
   try {
     const server = await checkServerKeyStatus();
-    if (server.available) {
+    if (!key && server.available && server.hasServerKey) {
       const res = await fetch('/api/gemini/test-key', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(key ? { 'x-gemini-api-key': key } : {}) },
-        body: JSON.stringify({ apiKey: key, model }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
@@ -774,9 +767,7 @@ export async function testGeminiApiKey(
       return { success: true, message: data.message || 'Key is valid!' };
     }
 
-    if (!key) {
-      return { success: false, message: NO_KEY_ERROR };
-    }
+    if (!key) return { success: false, message: NO_KEY_ERROR };
 
     const res = await fetch(`${GEMINI_BASE}/${encodeURIComponent(resolveModelName(model))}:generateContent`, {
       method: 'POST',

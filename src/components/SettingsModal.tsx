@@ -14,12 +14,14 @@ import {
   EyeOff,
   X,
   Sun,
+  Moon,
+  Monitor,
   Sparkles,
   ShieldCheck,
   Globe,
   Server,
 } from 'lucide-react';
-import { AiProvider, AppSettings, Language } from '../types';
+import { AiProvider, AppSettings, Language, Theme } from '../types';
 import { translations } from '../utils/i18n';
 import {
   testGeminiApiKey,
@@ -78,6 +80,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   } | null>(null);
 
   const [language, setLanguage] = useState<Language>(settings.language || 'vi');
+  const [theme, setTheme] = useState<Theme>(settings.theme || 'dark');
   const [fontSize, setFontSize] = useState(settings.fontSize || 15);
   const [fontFamily, setFontFamily] = useState(settings.fontFamily || 'sans');
   const [lineNumbers, setLineNumbers] = useState(settings.lineNumbers ?? true);
@@ -99,6 +102,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setOpenaiModel(settings.openaiModel || 'gpt-4o-mini');
       setRememberApiKeys(settings.rememberApiKeys ?? false);
       setLanguage(settings.language || 'vi');
+      setTheme(settings.theme || 'dark');
       setFontSize(settings.fontSize || 15);
       setFontFamily(settings.fontFamily || 'sans');
       setLineNumbers(settings.lineNumbers ?? true);
@@ -163,7 +167,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       openaiModel: openaiModel.trim(),
       rememberApiKeys,
       language,
-      theme: 'light',
+      theme,
       fontSize,
       fontFamily,
       lineNumbers,
@@ -312,7 +316,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       <Sparkles className="w-3.5 h-3.5 text-indigo-600" /> Gemini (mặc định)
                     </div>
                     <div className="text-[10px] text-slate-500 mt-1">
-                      Ưu tiên key server an toàn; fallback key cá nhân (BYOK).
+                      BYOK gọi thẳng Google; nếu không có key cá nhân sẽ dùng key server.
                     </div>
                   </button>
                   <button
@@ -675,10 +679,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
 
                 <div>
-                  <label className="font-semibold text-slate-800 block mb-1">Giao diện (Chế độ duy nhất)</label>
-                  <div className="flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-700 font-semibold">
-                    <Sun className="w-4 h-4 text-amber-500" />
-                    <span>Chế độ sáng (Light Mode duy nhất)</span>
+                  <label className="font-semibold text-slate-800 block mb-1">Giao diện</label>
+                  <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-50 border border-slate-200">
+                    {([
+                      { value: 'dark', label: 'Tối', icon: Moon },
+                      { value: 'light', label: 'Sáng', icon: Sun },
+                      { value: 'system', label: 'Hệ thống', icon: Monitor },
+                    ] as const).map((option) => {
+                      const Icon = option.icon;
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => setTheme(option.value)}
+                          className={`flex items-center justify-center gap-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold transition-colors cursor-pointer ${
+                            theme === option.value
+                              ? 'bg-indigo-600 text-white shadow-sm'
+                              : 'text-slate-600 hover:bg-white hover:text-slate-900'
+                          }`}
+                        >
+                          <Icon className="w-3.5 h-3.5" />
+                          <span>{option.label}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
@@ -753,7 +777,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
                 <div className="font-bold text-slate-900 flex items-center justify-between">
                   <span>{t.storageStatus}</span>
-                  <span className="text-emerald-700 font-semibold">100% Cục bộ & Bảo mật</span>
+                  <span className="text-emerald-700 font-semibold">Lưu trữ cục bộ</span>
                 </div>
                 <div className="grid grid-cols-3 gap-2 pt-2 text-center">
                   <div className="p-2 bg-white rounded-lg border border-slate-200">
@@ -811,7 +835,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Footer */}
         <div className="flex items-center justify-between px-6 py-3.5 border-t border-slate-200 bg-slate-50/80">
-          <span className="text-[11px] text-slate-400">MDEdit • Phiên bản sáng độc quyền</span>
+          <span className="text-[11px] text-slate-400">MDEdit • Local-first Markdown workspace</span>
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}

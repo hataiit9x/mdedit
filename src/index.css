@@ -1,11 +1,56 @@
 @import "tailwindcss";
 
 @layer base {
+  html {
+    color-scheme: light;
+  }
+
   body {
     background-color: #f8fafc;
     color: #0f172a;
     overflow: hidden;
   }
+}
+
+/* Class-based dark mode. Existing Tailwind utility markup is intentionally
+   preserved; these semantic overrides keep every modal and editor surface in
+   sync without duplicating dark:* classes across the component tree. */
+.dark body {
+  background-color: #020617;
+  color: #e2e8f0;
+}
+
+.dark .bg-white { background-color: #0f172a !important; }
+.dark .bg-slate-50 { background-color: #0f172a !important; }
+.dark .bg-slate-100 { background-color: #1e293b !important; }
+.dark .bg-slate-50\/40,
+.dark .bg-slate-50\/50,
+.dark .bg-slate-50\/70,
+.dark .bg-slate-50\/80 { background-color: rgba(15, 23, 42, 0.88) !important; }
+.dark .bg-white\/95 { background-color: rgba(15, 23, 42, 0.96) !important; }
+.dark .text-slate-900 { color: #f8fafc !important; }
+.dark .text-slate-800 { color: #e2e8f0 !important; }
+.dark .text-slate-700 { color: #cbd5e1 !important; }
+.dark .text-slate-600 { color: #94a3b8 !important; }
+.dark .text-slate-500 { color: #94a3b8 !important; }
+.dark .text-slate-400 { color: #64748b !important; }
+.dark .border-slate-100 { border-color: #1e293b !important; }
+.dark .border-slate-200 { border-color: #334155 !important; }
+.dark .border-slate-300 { border-color: #475569 !important; }
+.dark .bg-indigo-50 { background-color: #1e1b4b !important; }
+.dark .bg-indigo-50\/40,
+.dark .bg-indigo-50\/80,
+.dark .bg-indigo-50\/95 { background-color: rgba(30, 27, 75, 0.9) !important; }
+.dark .text-indigo-900 { color: #e0e7ff !important; }
+.dark .text-indigo-800 { color: #c7d2fe !important; }
+.dark .text-indigo-700 { color: #a5b4fc !important; }
+.dark .bg-emerald-50 { background-color: #022c22 !important; }
+.dark .bg-amber-50 { background-color: #451a03 !important; }
+.dark .bg-rose-50 { background-color: #4c0519 !important; }
+.dark .glass-panel,
+.dark .glass-panel-elevated {
+  background: rgba(15, 23, 42, 0.9);
+  border-color: #334155;
 }
 
 /* Custom crisp light scrollbars */

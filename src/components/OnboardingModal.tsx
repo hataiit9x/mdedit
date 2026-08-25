@@ -54,7 +54,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               MDEdit
             </span>
             <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-              Bảo mật 100% Cục bộ
+              Local-first & Riêng tư
             </span>
           </div>
           <button

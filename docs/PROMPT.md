@@ -1,5 +1,7 @@
 # Prompt vibe-code MDEdit trong Google AI Studio
 
+> **Lưu ý:** Đây là prompt khởi tạo được lưu lại để minh bạch quá trình vibe-code. Sản phẩm hiện tại đã phát triển thêm proxy server tùy chọn, kho key mã hóa, Gemini 3.x và theme Dark/Light/System; xem `README.md` và mã nguồn để biết hành vi hiện hành.
+
 > Quy trình chính thức theo Participant Handbook của AI Riser Vietnam 2026.
 > Vào **<https://ai.dev>** → **Build** → **+ New app** → chọn integration **Gemini API** → dán prompt bên dưới → **Build**.
 
@@ -16,9 +18,9 @@ System Role: You are an expert full-stack developer and UX/UI designer known for
 beautiful, intuitive, and highly functional web applications.
 
 Task: Build "MDEdit" — a free, open-source, privacy-first Markdown editor with an AI
-writing assistant powered by the Gemini API. The app runs 100% in the browser with NO
+writing assistant powered by the Gemini API. Documents are stored locally in the browser with NO
 backend: every document stays on the user's device. No accounts, no servers, no tracking.
-Users bring their own Gemini API key (BYOK) so the app is free forever.
+Users bring their own Gemini API key (BYOK), with usage subject to the provider's current quota and pricing policy.
 
 Core Features:
 
@@ -33,7 +35,7 @@ Core Features:
 2. AI Writing Assistant (Gemini API — this is the core integration)
 - Use the @google/genai SDK. If an environment API key is available, use it; otherwise
   show a Settings dialog where the user pastes their own free Gemini API key (with a link
-  to aistudio.google.com/apikey and a "Test key" button). Store the key in localStorage.
+  to aistudio.google.com/apikey and a "Test key" button). Keep the key in memory by default, with optional encrypted IndexedDB persistence.
 - Model selector: default "gemini-2.5-flash", optional "gemini-2.5-pro"
 - 8 one-click actions on the selected text, each with a fixed system instruction:
   • Improve: "You are a writing assistant. Improve the following text for clarity,

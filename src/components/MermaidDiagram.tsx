@@ -21,21 +21,21 @@ export default function MermaidDiagram({ code, isDark = false }: MermaidDiagramP
     try {
       mermaid.initialize({
         startOnLoad: false,
-        theme: 'default',
+        theme: isDark ? 'dark' : 'default',
         // 'strict' escapes HTML inside diagram labels; combined with the
         // DOMPurify pass below this keeps user-authored diagrams from
         // injecting markup into the page.
         securityLevel: 'strict',
         fontFamily: 'inherit',
         themeVariables: {
-          darkMode: false,
-          background: '#ffffff',
+          darkMode: isDark,
+          background: isDark ? '#0f172a' : '#ffffff',
           primaryColor: '#6366f1',
-          primaryTextColor: '#0f172a',
+          primaryTextColor: isDark ? '#f8fafc' : '#0f172a',
           primaryBorderColor: '#4f46e5',
-          lineColor: '#64748b',
-          secondaryColor: '#f1f5f9',
-          tertiaryColor: '#f8fafc',
+          lineColor: isDark ? '#94a3b8' : '#64748b',
+          secondaryColor: isDark ? '#1e293b' : '#f1f5f9',
+          tertiaryColor: isDark ? '#334155' : '#f8fafc',
         },
       });
 

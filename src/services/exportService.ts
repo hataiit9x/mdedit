@@ -1,7 +1,6 @@
 // Legacy export entry points that are not superseded by exportUtils.ts.
 // Rich HTML/PDF/DOCX/PNG exports live in ./exportUtils.
 
-import * as XLSX from 'xlsx';
 import { parseMarkdownTables } from '../utils/markdownUtils';
 import { downloadBlob, downloadTextFile, slugifyFilename } from '../utils/files';
 
@@ -29,7 +28,11 @@ export function exportAsPlainText(title: string, content: string) {
 }
 
 // 3. Export Markdown Tables to CSV & XLSX (one sheet/file per table)
-export function exportTablesToSpreadsheet(title: string, markdown: string, format: 'xlsx' | 'csv' = 'xlsx'): boolean {
+export async function exportTablesToSpreadsheet(
+  title: string,
+  markdown: string,
+  format: 'xlsx' | 'csv' = 'xlsx'
+): Promise<boolean> {
   const parsedTables = parseMarkdownTables(markdown);
   if (parsedTables.length === 0) {
     return false;
@@ -50,6 +53,7 @@ export function exportTablesToSpreadsheet(title: string, markdown: string, forma
     return true;
   } else {
     // XLSX Workbook with each table on its own sheet
+    const XLSX = await import('xlsx');
     const workbook = XLSX.utils.book_new();
     parsedTables.forEach((table, index) => {
       const data = [table.headers, ...table.rows];

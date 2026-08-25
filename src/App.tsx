@@ -57,15 +57,6 @@ import {
   exportAsMarkdown,
   exportAsPlainText,
 } from './services/exportService';
-import {
-  exportToHtml,
-  exportToPdf,
-  exportToDocx,
-  exportToPng,
-  exportToExcel,
-  exportToCsv,
-  copyHtmlToClipboard,
-} from './services/exportUtils';
 import { useHistory } from './hooks/useHistory';
 
 // Subcomponents
@@ -75,7 +66,6 @@ import { MarkdownPreview } from './components/MarkdownPreview';
 import { EditorToolbar } from './components/EditorToolbar';
 import { TableOfContents } from './components/TableOfContents';
 import { AiAssistantModal } from './components/AiAssistantModal';
-import { ExportModal } from './components/ExportModal';
 import { ExportMenuDropdown } from './components/ExportMenuDropdown';
 import { SettingsModal } from './components/SettingsModal';
 import { FindReplaceModal } from './components/FindReplaceModal';
@@ -84,6 +74,10 @@ import { ShortcutsModal } from './components/ShortcutsModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { GoToLineDialog } from './components/GoToLineDialog';
 
+const ExportModal = React.lazy(() =>
+  import('./components/ExportModal').then((module) => ({ default: module.ExportModal }))
+);
+
 const INITIAL_SETTINGS: AppSettings = {
   selectedModel: 'gemini-3.7-flash',
   aiProvider: 'gemini',
@@ -91,7 +85,7 @@ const INITIAL_SETTINGS: AppSettings = {
   openaiModel: 'gpt-4o-mini',
   rememberApiKeys: false,
   language: 'vi',
-  theme: 'light',
+  theme: 'dark',
   fontSize: 15,
   fontFamily: 'sans',
   lineNumbers: true,
@@ -108,6 +102,7 @@ export default function App() {
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [currentDoc, setCurrentDoc] = useState<DocumentItem | null>(null);
   const [settings, setSettings] = useState<AppSettings>(INITIAL_SETTINGS);
+  const [isDarkTheme, setIsDarkTheme] = useState(true);
 
   // UI state
   const [viewMode, setViewMode] = useState<ViewMode>('split');
@@ -164,6 +159,20 @@ export default function App() {
   const pendingSaveRef = useRef<{ docId: string; content: string } | null>(null);
 
   const t = translations[settings.language || 'vi'];
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const applyTheme = () => {
+      const useDark = settings.theme === 'dark' || (settings.theme === 'system' && media.matches);
+      document.documentElement.classList.toggle('dark', useDark);
+      document.documentElement.style.colorScheme = useDark ? 'dark' : 'light';
+      setIsDarkTheme(useDark);
+    };
+
+    applyTheme();
+    media.addEventListener('change', applyTheme);
+    return () => media.removeEventListener('change', applyTheme);
+  }, [settings.theme]);
 
   const showToast = (
     text: string,
@@ -230,6 +239,7 @@ export default function App() {
 
   const handleDirectExportPdf = async () => {
     if (!currentDoc) return;
+    const { exportToPdf } = await import('./services/exportUtils');
     showToast('Đang mở hộp thoại in / xuất PDF...', 'info');
     const ok = await exportToPdf(currentDoc.title, currentDoc.content);
     if (!ok) {
@@ -239,6 +249,7 @@ export default function App() {
 
   const handleDirectExportWord = async () => {
     if (!currentDoc) return;
+    const { exportToDocx } = await import('./services/exportUtils');
     showToast('Đang tạo tệp Microsoft Word (.docx)...', 'info');
     const ok = await exportToDocx(currentDoc.title, currentDoc.content);
     showToast(
@@ -255,6 +266,7 @@ export default function App() {
 
   const handleDirectExportHtml = async () => {
     if (!currentDoc) return;
+    const { exportToHtml } = await import('./services/exportUtils');
     showToast('Đang tạo tệp HTML độc lập...', 'info');
     try {
       await exportToHtml(currentDoc.title, currentDoc.content);
@@ -266,6 +278,7 @@ export default function App() {
 
   const handleDirectExportPng = async () => {
     if (!currentDoc) return;
+    const { exportToPng } = await import('./services/exportUtils');
     showToast('Đang xử lý ảnh PNG...', 'info');
     const ok = await exportToPng(currentDoc.title, currentDoc.content);
     showToast(
@@ -276,6 +289,7 @@ export default function App() {
 
   const handleDirectExportExcel = async () => {
     if (!currentDoc) return;
+    const { exportToExcel } = await import('./services/exportUtils');
     const ok = await exportToExcel(currentDoc.title, currentDoc.content);
     showToast(
       ok ? 'Đã xuất nội dung ra tệp Excel (.xlsx) thành công!' : 'Không có nội dung nào để xuất.',
@@ -285,6 +299,7 @@ export default function App() {
 
   const handleDirectExportCsv = async () => {
     if (!currentDoc) return;
+    const { exportToCsv } = await import('./services/exportUtils');
     const ok = await exportToCsv(currentDoc.title, currentDoc.content);
     showToast(
       ok ? 'Đã xuất nội dung ra tệp CSV thành công!' : 'Không có nội dung nào để xuất.',
@@ -300,6 +315,7 @@ export default function App() {
 
   const handleDirectCopyHtml = async () => {
     if (!currentDoc) return;
+    const { copyHtmlToClipboard } = await import('./services/exportUtils');
     const ok = await copyHtmlToClipboard(currentDoc.content);
     showToast(
       ok ? 'Đã sao chép mã HTML vào clipboard!' : 'Không thể sao chép HTML.',
@@ -322,7 +338,7 @@ export default function App() {
       await saveSettings({ geminiApiKey: '' } as unknown as Partial<AppSettings>);
     }
 
-    setSettings({ ...storedSettings, theme: 'light' });
+    setSettings(storedSettings);
     setViewMode(storedSettings.defaultPaneMode || 'split');
 
     const docs = await getAllDocuments();
@@ -504,7 +520,7 @@ export default function App() {
   };
 
   const handleSaveSettings = async (newSettings: Partial<AppSettings>) => {
-    const updated = await saveSettings({ ...newSettings, theme: 'light' });
+    const updated = await saveSettings(newSettings);
     setSettings(updated);
   };
 
@@ -974,7 +990,7 @@ export default function App() {
     <MarkdownPreview
       ref={previewRef}
       content={currentContent}
-      isDark={false}
+      isDark={isDarkTheme}
       fontSize={settings.fontSize}
       fontFamily={settings.fontFamily}
       onScroll={handlePreviewScroll}
@@ -1372,13 +1388,17 @@ export default function App() {
         }}
       />
 
-      <ExportModal
-        isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
-        documentTitle={currentDoc?.title || 'Tài liệu'}
-        documentContent={currentContent}
-        language={settings.language || 'vi'}
-      />
+      {isExportModalOpen && (
+        <React.Suspense fallback={null}>
+          <ExportModal
+            isOpen
+            onClose={() => setIsExportModalOpen(false)}
+            documentTitle={currentDoc?.title || 'Tài liệu'}
+            documentContent={currentContent}
+            language={settings.language || 'vi'}
+          />
+        </React.Suspense>
+      )}
 
       <SettingsModal
         isOpen={isSettingsOpen}
@@ -1416,11 +1436,11 @@ export default function App() {
         isOpen={isOnboardingOpen}
         onClose={() => {
           setIsOnboardingOpen(false);
-          saveSettings({ hasSeenOnboarding: true, theme: 'light' });
+          saveSettings({ hasSeenOnboarding: true });
         }}
         onOpenSettings={() => {
           setIsOnboardingOpen(false);
-          saveSettings({ hasSeenOnboarding: true, theme: 'light' });
+          saveSettings({ hasSeenOnboarding: true });
           setIsSettingsOpen(true);
         }}
         language={settings.language || 'vi'}

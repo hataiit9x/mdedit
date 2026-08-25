@@ -1,4 +1,4 @@
-import React, { forwardRef, useState } from 'react';
+import React, { forwardRef, lazy, Suspense, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -6,8 +6,6 @@ import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeSlug from 'rehype-slug';
 import { Copy, Check, FileSpreadsheet, Download } from 'lucide-react';
-import MermaidDiagram from './MermaidDiagram';
-import * as XLSX from 'xlsx';
 import { downloadBlob } from '../services/exportService';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
@@ -33,9 +31,10 @@ function hastText(node: any): string {
 }
 
 const SAFE_HREF = /^(https?:|mailto:|tel:|#|\/)/i;
+const MermaidDiagram = lazy(() => import('./MermaidDiagram'));
 
 export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
-  ({ content, fontSize = 15, fontFamily = 'sans', onScroll }, ref) => {
+  ({ content, isDark = false, fontSize = 15, fontFamily = 'sans', onScroll }, ref) => {
     const fontClass =
       fontFamily === 'serif'
         ? 'font-serif'
@@ -136,7 +135,11 @@ export const MarkdownPreview = forwardRef<HTMLDivElement, MarkdownPreviewProps>(
                 const codeString = hastText(node).replace(/\n$/, '');
 
                 if (!isInline && language === 'mermaid') {
-                  return <MermaidDiagram code={codeString} isDark={false} />;
+                  return (
+                    <Suspense fallback={<div className="my-4 text-xs text-slate-500">Đang tải sơ đồ Mermaid…</div>}>
+                      <MermaidDiagram code={codeString} isDark={isDark} />
+                    </Suspense>
+                  );
                 }
 
                 if (!isInline) {
@@ -232,7 +235,7 @@ function EnhancedTable({ children }: { children: React.ReactNode }) {
   const [isExporting, setIsExporting] = useState(false);
   const tableRef = React.useRef<HTMLTableElement>(null);
 
-  const exportCurrentTable = (format: 'xlsx' | 'csv') => {
+  const exportCurrentTable = async (format: 'xlsx' | 'csv') => {
     if (!tableRef.current) return;
     setIsExporting(true);
     try {
@@ -247,6 +250,7 @@ function EnhancedTable({ children }: { children: React.ReactNode }) {
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         downloadBlob(blob, `table_export_${Date.now()}.csv`);
       } else {
+        const XLSX = await import('xlsx');
         const ws = XLSX.utils.aoa_to_sheet(data);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'Table');
@@ -268,7 +272,7 @@ function EnhancedTable({ children }: { children: React.ReactNode }) {
       </div>
       <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-white border border-slate-200 rounded-lg p-1 shadow-md text-xs">
         <button
-          onClick={() => exportCurrentTable('csv')}
+          onClick={() => void exportCurrentTable('csv')}
           disabled={isExporting}
           className="flex items-center gap-1 px-2 py-1 text-slate-700 hover:bg-slate-100 rounded transition-colors cursor-pointer"
           title="Xuất bảng này ra CSV"
@@ -277,7 +281,7 @@ function EnhancedTable({ children }: { children: React.ReactNode }) {
           <span>CSV</span>
         </button>
         <button
-          onClick={() => exportCurrentTable('xlsx')}
+          onClick={() => void exportCurrentTable('xlsx')}
           disabled={isExporting}
           className="flex items-center gap-1 px-2 py-1 text-emerald-700 hover:bg-emerald-50 rounded transition-colors cursor-pointer font-medium"
           title="Xuất bảng này ra Excel XLSX"

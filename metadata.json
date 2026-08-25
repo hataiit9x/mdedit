@@ -1,6 +1,6 @@
 {
   "name": "MDEdit",
-  "description": "A free, open-source, privacy-first Markdown editor with an AI writing assistant powered by the Gemini API. Runs 100% in the browser with local storage and BYOK.",
+  "description": "A free, open-source, local-first Markdown editor with an AI writing assistant powered by Gemini. Documents stay in browser storage; BYOK calls Google directly.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

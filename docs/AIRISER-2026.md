@@ -17,7 +17,7 @@
 
 - [ ] **AI Studio link**: app được build bằng Google AI Studio (Share → Public → Copy link)
 - [ ] **Video demo**: YouTube public
-- [ ] **Bài social post**: chia sẻ video + hành trình + câu chuyện cá nhân (public)
+- [x] **Bài social post**: [LinkedIn — Tai Ha](https://www.linkedin.com/posts/hatai-it9x_buildwithgoogleai-airiservietnam2026-mdedit-share-7497910968891396096-bnmF/) (public, đầy đủ video + hành trình + câu chuyện cá nhân)
 
 ## Lộ trình thực hiện
 
@@ -49,8 +49,8 @@ Kịch bản gợi ý:
 - [ ] Upload public, điền mô tả đầy đủ link
 
 ### Bước D — Social post
-- [ ] Đăng public (LinkedIn/Facebook) nội dung: hành trình build với AI Studio + Gemini, khó khăn & cách giải quyết, link video, link app
-- [ ] Hashtag: #BuildwithGoogleAI #AIRiserVietnam2026
+- [x] Đăng public trên [LinkedIn](https://www.linkedin.com/posts/hatai-it9x_buildwithgoogleai-airiservietnam2026-mdedit-share-7497910968891396096-bnmF/): hành trình build với AI Studio + Gemini, khó khăn & cách giải quyết, link video và link app
+- [x] Hashtag: #BuildwithGoogleAI #AIRiserVietnam2026
 
 ### Bước E — Nộp form (làm sớm cho kịp 200 đơn đầu!)
 - [ ] Form hoàn thành: <https://goo.gle/airiservietnam-completion>
@@ -60,5 +60,6 @@ Kịch bản gợi ý:
 
 ## Lưu ý an toàn
 
-- Không commit bất kỳ API key thật nào vào repo (key chỉ nằm trong localStorage người dùng)
+- Không commit bất kỳ API key thật nào vào repo (key cá nhân nằm trong phiên hoặc kho IndexedDB mã hóa)
+- Trước khi nộp, thay toàn bộ ô `TODO trước khi nộp` trong `README.md` bằng link public thật
 - Repo này khởi tạo với lịch sử git sạch, không mang theo lịch sử từ mdtools

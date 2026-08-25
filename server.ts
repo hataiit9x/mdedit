@@ -1,6 +1,5 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 
@@ -11,9 +10,9 @@ async function startServer() {
   // Cloud Run injects PORT; keep 3000 for local dev.
   const PORT = Number(process.env.PORT) || 3000;
 
-  // Cloud Run terminates TLS in front of the app: honour X-Forwarded-For so
-  // the rate limiter below sees the real client IP.
-  app.set("trust proxy", true);
+  // Cloud Run terminates TLS one hop in front of the app. Trust exactly one
+  // proxy so callers cannot bypass the limiter with a forged left-most XFF.
+  app.set("trust proxy", 1);
 
   app.use(express.json({ limit: "10mb" }));
 
@@ -35,6 +34,10 @@ async function startServer() {
         for (const [key, value] of rateBuckets) {
           if (value.resetAt < now) rateBuckets.delete(key);
         }
+      }
+      if (rateBuckets.size >= 10_000) {
+        const oldestKey = rateBuckets.keys().next().value;
+        if (oldestKey) rateBuckets.delete(oldestKey);
       }
       rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
       return next();
@@ -162,10 +165,10 @@ async function startServer() {
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // Helper to get GoogleGenAI client
-  const getAiClient = (customKey?: string) => {
-    const key = customKey?.trim() || process.env.GEMINI_API_KEY?.trim();
+  const getAiClient = () => {
+    const key = process.env.GEMINI_API_KEY?.trim();
     if (!key) {
-      throw new Error("Chưa cấu hình Gemini API Key. Vui lòng nhập API Key trong mục Cài đặt (hoặc cấu hình GEMINI_API_KEY).");
+      throw new Error("Server chưa cấu hình GEMINI_API_KEY. Hãy thêm secret phía server hoặc dùng BYOK trực tiếp trong trình duyệt.");
     }
     return new GoogleGenAI({
       apiKey: key,
@@ -222,9 +225,8 @@ async function startServer() {
   // Test Gemini API key
   app.post("/api/gemini/test-key", async (req, res) => {
     try {
-      const customKey = (req.headers["x-gemini-api-key"] as string) || req.body?.apiKey;
       const modelName = resolveModelName(req.body?.model);
-      const ai = getAiClient(customKey);
+      const ai = getAiClient();
 
       const { response, modelUsed } = await generateWithFallback(ai, modelName, {
         contents: "Respond with the single word: OK",
@@ -252,7 +254,6 @@ async function startServer() {
   // Execute AI Writing Assistant action (Synchronous)
   app.post("/api/gemini/action", async (req, res) => {
     try {
-      const customKey = (req.headers["x-gemini-api-key"] as string) || req.body?.apiKey;
       const { prompt, systemInstruction, model } = req.body;
 
       if (!prompt || typeof prompt !== "string") {
@@ -260,7 +261,7 @@ async function startServer() {
       }
 
       const modelName = resolveModelName(model);
-      const ai = getAiClient(customKey);
+      const ai = getAiClient();
 
       const { response, modelUsed } = await generateWithFallback(ai, modelName, {
         contents: prompt,
@@ -298,7 +299,6 @@ async function startServer() {
     });
 
     try {
-      const customKey = (req.headers["x-gemini-api-key"] as string) || req.body?.apiKey;
       const { prompt, systemInstruction, model } = req.body;
 
       if (!prompt || typeof prompt !== "string") {
@@ -307,7 +307,7 @@ async function startServer() {
       }
 
       const modelName = resolveModelName(model);
-      const ai = getAiClient(customKey);
+      const ai = getAiClient();
       const candidateModels = [modelName, ...getFallbackModels(modelName).filter((m) => m !== modelName)];
 
       let streamSucceeded = false;
@@ -533,7 +533,9 @@ async function startServer() {
   });
 
   // Vite middleware for development vs static build in production
-  if (process.env.NODE_ENV !== "production") {
+  const isProduction = process.env.NODE_ENV === "production" || process.argv.includes("--production");
+  if (!isProduction) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

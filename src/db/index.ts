@@ -25,7 +25,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   openaiModel: 'gpt-4o-mini',
   rememberApiKeys: false,
   language: 'vi',
-  theme: 'light',
+  theme: 'dark',
   fontSize: 15,
   fontFamily: 'sans',
   lineNumbers: true,
@@ -41,12 +41,12 @@ const SAMPLE_DOC_EN: DocumentItem = {
   title: '🚀 Welcome to MDEdit — Feature Showcase',
   content: `# Welcome to MDEdit
 
-MDEdit is a **privacy-first**, open-source Markdown workspace with an integrated **Gemini AI Writing Assistant**. Every document and folder is stored **100% locally in your browser** via IndexedDB.
+MDEdit is a **privacy-first**, open-source Markdown workspace with an integrated **Gemini AI Writing Assistant**. Every document and folder is stored locally in your browser via IndexedDB.
 
 ---
 
 ## ⚡ Key Highlights
-- 🔒 **Zero Telemetry**: No accounts, no tracking cookies, no server-side document storage.
+- 🔒 **Local-first**: No accounts, no tracking cookies, no server-side document storage.
 - 🤖 **Bring Your Own Key (BYOK)**: Use your free Gemini API key with zero subscription costs.
 - 📐 **Math & Diagrams**: Live KaTeX formulas and Mermaid chart rendering.
 - 💾 **File System Access**: Open, edit, and save directly to your local files.
@@ -59,7 +59,7 @@ MDEdit is a **privacy-first**, open-source Markdown workspace with an integrated
 | Feature | Local Browser | Cloud Server | Privacy Level |
 | :--- | :---: | :---: | :--- |
 | **Document Storage** | IndexedDB (Dexie) | ❌ None | 100% On-device |
-| **AI Processing** | Direct via Gemini API | ❌ None | BYOK (Your Key) |
+| **AI Processing** | Direct via Gemini API | Only selected content | BYOK (Your Key) |
 | **Export Formats** | PDF, DOCX, HTML, PNG, XLSX | ❌ None | Instant Client-side |
 
 ---
@@ -96,10 +96,11 @@ flowchart TD
 
 \`\`\`typescript
 import { GoogleGenAI } from "@google/genai";
+import { getSecret } from "./services/secureKeyStore";
 
 // MDEdit connects directly using your BYOK Gemini API key
 export async function enhanceText(input: string, action: string) {
-  const ai = new GoogleGenAI({ apiKey: localStorage.getItem("gemini_key") });
+  const ai = new GoogleGenAI({ apiKey: await getSecret("gemini") });
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
     contents: input,
@@ -132,13 +133,13 @@ const SAMPLE_DOC_VI: DocumentItem = {
   title: '🇻🇳 Hướng dẫn sử dụng MDEdit & Trợ lý AI',
   content: `# Chào mừng bạn đến với MDEdit
 
-MDEdit là trình soạn thảo Markdown **bảo mật tuyệt đối**, hoạt động **100% cục bộ trên trình duyệt** (IndexedDB) và tích hợp **Trợ lý AI Gemini**.
+MDEdit là trình soạn thảo Markdown **local-first**: tài liệu được lưu cục bộ trong IndexedDB và tích hợp **Trợ lý AI Gemini**.
 
 ---
 
 ## 🌟 Điểm nổi bật
-- 🛡️ **Bảo mật tuyệt đối**: Dữ liệu không bao giờ rời khỏi thiết bị của bạn.
-- 🔑 **Mô hình BYOK**: Tự mang khóa Gemini API miễn phí để dùng không giới hạn.
+- 🛡️ **Riêng tư theo thiết kế**: Không tài khoản, không tracking, không lưu tài liệu trên server.
+- 🔑 **Mô hình BYOK**: Tự dùng Gemini API key; chỉ nội dung bạn yêu cầu AI xử lý mới được gửi tới Google.
 - 📐 **Công thức toán & Sơ đồ**: Hỗ trợ KaTeX ($$) và Mermaid trực quan.
 - 📄 **Xuất đa định dạng**: Hỗ trợ **DOCX (Word)**, **PDF in ấn**, **HTML độc lập**, **PNG**, **CSV/Excel**.
 
@@ -149,7 +150,7 @@ MDEdit là trình soạn thảo Markdown **bảo mật tuyệt đối**, hoạt 
 | Chức năng | Cơ chế hoạt động | Bảo mật |
 | :--- | :--- | :--- |
 | **Lưu trữ ghi chú** | IndexedDB trên máy | 100% Cục bộ |
-| **Trợ lý viết AI** | Gemini 2.5 Flash / Pro | Khóa riêng (BYOK) |
+| **Trợ lý viết AI** | Gemini 3.7 Flash / 3.6 Flash | Khóa riêng (BYOK) |
 | **Xuất tệp** | Xử lý trực tiếp trên trình duyệt | An toàn tuyệt đối |
 
 ---
@@ -368,8 +369,8 @@ export async function exportAllDataJson(): Promise<string> {
     exportedAt: new Date().toISOString(),
     documents: docs,
     folders: folders,
-    // API keys never leave the device: they live in a separate encrypted
-    // store and are intentionally excluded from backups.
+    // API keys live in a separate encrypted/session store and are
+    // intentionally excluded from backups.
     settings,
   };
 

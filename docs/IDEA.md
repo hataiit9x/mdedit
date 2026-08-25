@@ -6,11 +6,12 @@
 
 ## 1. Tuyên ngôn sản phẩm
 
-**"Tài liệu của bạn ở lại với bạn. AI của bạn do bạn trả tiền — nhưng miễn phí."**
+**"Tài liệu của bạn ở lại với bạn. Bạn chủ động chọn nội dung gửi tới AI."**
 
 - Không cần đăng ký, không cần đăng nhập
 - Không có server lưu tài liệu — tất cả nằm trong trình duyệt (IndexedDB)
-- AI chạy bằng Gemini API key của chính người dùng (BYOK) → ứng dụng miễn phí vĩnh viễn, không ai phải lo quota thay ai
+- AI dùng Gemini API key của người dùng (BYOK) hoặc secret của bản triển khai; Free Tier và quota do Google quy định
+- Chỉ nội dung người dùng yêu cầu AI xử lý mới rời thiết bị
 
 ## 2. Người dùng mục tiêu
 
@@ -18,7 +19,7 @@
 |---|---|---|
 | Sinh viên viết bài tập, luận văn | Word nặng, muốn viết nhanh + xuất đẹp, cần AI hỗ trợ nhưng không có tiền trả subscription | Miễn phí + BYOK key free của Google |
 | Kỹ sư viết tài liệu / README / báo cáo | Cần Markdown chuẩn, sơ đồ Mermaid, công thức toán, xuất DOCX cho người không biết Markdown | Editor đầy đủ + export đa định dạng |
-| Người quan tâm riêng tư | Không muốn ghi chú của mình nằm trên server bên thứ ba | Local-first, dữ liệu không rời máy |
+| Người quan tâm riêng tư | Không muốn toàn bộ kho ghi chú nằm trên server bên thứ ba | Local-first; chỉ nội dung được chọn mới gửi tới AI |
 
 ## 3. Tính năng chi tiết
 
@@ -31,9 +32,9 @@
 - Find & Replace, Go to line, Undo/Redo, phím tắt, chế độ tập trung fullscreen
 
 ### 3.2 Trợ lý viết AI (Gemini API — tích hợp cốt lõi)
-- SDK: `@google/genai`. Ưu tiên env key nếu có (khi chạy trong AI Studio), không thì hỏi key người dùng.
-- Settings dialog: ô dán key + link `aistudio.google.com/apikey` + nút **Test key**; key lưu `localStorage`.
-- Chọn model: `gemini-2.5-flash` (mặc định) / `gemini-2.5-pro`.
+- SDK: `@google/genai`. Nếu có secret server thì dùng proxy; nếu người dùng nhập BYOK thì trình duyệt gọi thẳng Google.
+- Settings dialog: ô dán key + link `aistudio.google.com/apikey` + nút **Test key**; mặc định lưu trong phiên, tùy chọn mã hóa AES-GCM trong IndexedDB.
+- Chọn model: `gemini-3.7-flash` (mặc định), `gemini-3.6-flash`, `gemini-3.1-flash-lite`, `gemini-3.1-pro-preview`.
 - 8 hành động áp dụng lên đoạn văn bản đang chọn, mỗi hành động có system prompt cố định:
 
   | Hành động | System prompt |
@@ -69,10 +70,10 @@
 
 | Bỏ | Lý do |
 |---|---|
-| Backend FastAPI + PostgreSQL | Ứng dụng AI Studio chạy client-side; local-first không cần server |
+| Backend lưu tài liệu FastAPI + PostgreSQL | Tài liệu local-first không cần server; Express chỉ làm proxy AI tùy chọn và phục vụ web |
 | Đăng nhập / OAuth | Giảm ma sát; privacy-first nghĩa là không cần biết người dùng là ai |
-| Subscription / thanh toán (LemonSqueezy) | Open-source, miễn phí vĩnh viễn; BYOK chuyển chi phí AI = 0 |
-| Rate-limit / usage tracking | Không còn server thì không còn gì để track |
+| Subscription / thanh toán (LemonSqueezy) | MDEdit không thu phí; chi phí/quota AI thuộc tài khoản hoặc bản triển khai |
+| Usage tracking | Không theo dõi người dùng; proxy AI tùy chọn chỉ rate-limit theo IP trong bộ nhớ để bảo vệ quota |
 | Realtime collaboration, share link | Phạm v1 quá lớn; để làm sau (roadmap) |
 
 ## 5. Differentiators (vì sao giám khảo nên chọn sản phẩm này)
